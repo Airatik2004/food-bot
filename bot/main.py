@@ -23,6 +23,23 @@ def env(name, required=True):
     return v
 
 
+def service_account():
+    raw = env("GOOGLE_SERVICE_ACCOUNT_JSON")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        a, b = raw.find("{"), raw.rfind("}")
+        if a >= 0 and b > a:
+            try:
+                return json.loads(raw[a:b + 1])
+            except json.JSONDecodeError:
+                pass
+    sys.exit("Секрет GOOGLE_SERVICE_ACCOUNT_JSON — не JSON-ключ. Вставь туда всё содержимое "
+             "скачанного .json-файла целиком, от первой { до последней }. "
+             f"Сейчас там {len(raw)} символов, начинается не с '{{'." if not raw.lstrip().startswith("{")
+             else "Секрет GOOGLE_SERVICE_ACCOUNT_JSON обрезан или испорчен — вставь файл целиком ещё раз.")
+
+
 def poll(bot: FoodBot, tg: Telegram, timeout=0) -> int:
     offset = int(to_num(bot.s.state.get("last_update_id"), 0)) + 1
     updates = tg.get_updates(offset, timeout=timeout)
@@ -37,7 +54,7 @@ def poll(bot: FoodBot, tg: Telegram, timeout=0) -> int:
 
 def main():
     tg = Telegram(env("TELEGRAM_TOKEN"))
-    store = SheetStore(json.loads(env("GOOGLE_SERVICE_ACCOUNT_JSON")), env("SPREADSHEET_ID")).load()
+    store = SheetStore(service_account(), env("SPREADSHEET_ID")).load()
     ai = Gemini(env("GEMINI_API_KEY"), str(store.setting("model")).strip(),
                 web_search=str(store.setting("web_search")).strip().lower() in ("да", "yes", "1", "true"))
     bot = FoodBot(store, tg, ai, env("TELEGRAM_CHAT_ID", required=False))
