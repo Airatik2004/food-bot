@@ -84,10 +84,22 @@ class FakeAI:
                                                        place="Чайхона №1")]}
         if "гранатовый сок" in text:
             return {"transcript": text, "items": [item("Гранатовый сок", 150, place="", amount="250 мл")]}
+        if "выпил сок 300 мл" in text:
+            if "неполный" in text:
+                return {"transcript": text, "items": [item("Сок", 140, complete=False, place="",
+                                                           amount="300 мл")]}
+            return {"transcript": text, "items": [item("Сок", 140, place="", amount="300 мл")]}
         if "вчера был он же" in text:
-            sid = int([l for l in history.split("\n") if "Гранатовый" in l][0].split(" | ")[0])
-            return {"transcript": "бутылка сока Rich", "items": [
-                item("Гранатовый сок", 160, place="Rich", amount="250 мл", updates_id=sid)]}
+            ids = {l.split(" | ")[2]: int(l.split(" | ")[0]) for l in history.split("\n") if l}
+            yid = ids["Гранатовый сок"]
+            if "Сок" in ids and open_q:   # сегодняшний сок ждёт ответа → answer_to + уточнение вчерашнего
+                return {"transcript": "бутылка Rich", "answer_to": int(open_q.split(" | ")[0]),
+                        "items": [item("Гранатовый сок", 160, place="Rich", amount="250 мл", updates_id=yid)]}
+            items = [item("Гранатовый сок", 160, place="Rich", amount="250 мл", updates_id=yid)]
+            if "Сок" in ids:
+                items.append(item("Гранатовый сок", 190, place="Rich", amount="300 мл",
+                                  updates_id=ids["Сок"]))
+            return {"transcript": "бутылка сока Rich", "items": items}
         if "вчера" in text:
             return {"transcript": text, "items": [item("Чипсы", 500, place="Lay's", yesterday=True)]}
         if "карамель" in text and open_q:
@@ -291,6 +303,30 @@ def test_retro_update():
     assert corr and "Rich" in corr[-1]["text"], "поправка к уже отправленному отчёту"
     total = sum(x["kcal"] or 0 for x in s.entries_of("2026-11-08") if x["status"] == "ок")
     assert total == 160, "сок не посчитан дважды"
+
+
+def test_retro_two_records():
+    s, tg, ai, bot, clock = make()
+    run(bot, clock, T(8, 12, 1), msg(1, T(8, 12), "гранатовый сок"))
+    run(bot, clock, T(9, 12, 1), msg(2, T(9, 12), "выпил сок 300 мл"))
+    run(bot, clock, T(9, 12, 3), msg(3, T(9, 12, 2), "вчера был он же", photo=True))
+    ok = {(x["day"], x["amount"]): x for x in s.entries if x["status"] == "ок"}
+    assert ok[("2026-11-08", "250 мл")]["place"] == "Rich"
+    assert ok[("2026-11-09", "300 мл")]["place"] == "Rich" and ok[("2026-11-09", "300 мл")]["kcal"] == 190
+    assert len(ok) == 2, "ничего не задвоилось"
+    assert any(m["text"].startswith("✏️ Уточнил запись за вс, 8 ноября, сегодня") for m in tg.sent)
+
+
+def test_retro_with_open_question():
+    s, tg, ai, bot, clock = make()
+    run(bot, clock, T(8, 12, 1), msg(1, T(8, 12), "гранатовый сок"))
+    run(bot, clock, T(9, 12, 1), msg(2, T(9, 12), "выпил сок 300 мл неполный"))
+    assert s.entry(2)["status"] == "ждёт ответа"
+    run(bot, clock, T(9, 12, 3), msg(3, T(9, 12, 2), "вчера был он же", photo=True))
+    assert s.entry(2)["status"] == "ок", "сегодняшний вопрос закрыт ответом"
+    assert s.entry(1)["status"] == "изменено"
+    y = [x for x in s.entries if x["day"] == "2026-11-08" and x["status"] == "ок"]
+    assert len(y) == 1 and y[0]["place"] == "Rich"
 
 
 def test_store_helpers():

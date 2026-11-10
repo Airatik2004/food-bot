@@ -69,6 +69,8 @@ def assign_day(ts: datetime, day_start: time) -> str:
 
 def fmt_num(v, unit):
     v = to_num(v, 0) or 0
+    if not v:
+        return "0"
     if unit == "ккал" or unit == "мг" or abs(v) >= 10:
         return f"{round(v):d}"
     return f"{v:.1f}".replace(".", ",")
@@ -304,9 +306,12 @@ class FoodBot:
 
     def history_text(self, days=4):
         since = (d_(self.today()) - timedelta(days=days)).isoformat()
-        rows = [e for e in self.s.entries if e["status"] in FOOD_DONE and e["day"] >= since]
+        rows = [e for e in self.s.entries
+                if e["status"] in FOOD_DONE + (NEED_ASK, WAITING) and e["day"] >= since]
         return "\n".join(f"{e['id']} | {e['time']} | {e['item']} | {e['place']} | {e['variant']} | "
-                         f"{e['amount']} | {fmt_num(e['kcal'], 'ккал')}" for e in rows[-60:])
+                          f"{e['amount']} | {fmt_num(e['kcal'], 'ккал')}"
+                          + (" | ждёт уточнения" if e["status"] in (NEED_ASK, WAITING) else "")
+                          for e in rows[-60:])
 
     def purchases_text(self, days=14):
         since = (d_(self.today()) - timedelta(days=days)).isoformat()
@@ -351,7 +356,12 @@ class FoodBot:
             e["status"] = ANSWER
             self.s.touch(e)
             self.apply_answer(target, tr or caption, [], reply_to=e["msg_id"])
-            return
+            # то же сообщение может уточнять и другие записи («вчера был он же»)
+            res["items"] = [it for it in (res.get("items") or [])
+                            if self.retro_target(it, e) and self.s.entry(it["updates_id"]) is not target]
+            res["receipt"] = []
+            if not res["items"]:
+                return
 
         receipt = res.get("receipt") or []
         for p in receipt:
