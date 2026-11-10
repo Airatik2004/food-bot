@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 
 from .gemini import Gemini
 from .logic import FoodBot
@@ -40,16 +41,41 @@ def service_account():
              else "Секрет GOOGLE_SERVICE_ACCOUNT_JSON обрезан или испорчен — вставь файл целиком ещё раз.")
 
 
-def poll(bot: FoodBot, tg: Telegram, timeout=0) -> int:
-    offset = int(to_num(bot.s.state.get("last_update_id"), 0)) + 1
-    updates = tg.get_updates(offset, timeout=timeout)
-    for u in updates:
+def handle_all(bot: FoodBot, updates) -> int:
+    last = int(to_num(bot.s.state.get("last_update_id"), 0))
+    n = 0
+    for u in sorted(updates, key=lambda x: x["update_id"]):
+        if u["update_id"] <= last:
+            continue  # уже обработано (Telegram мог прислать повтор)
         try:
             bot.handle_update(u)
         except Exception as ex:
             log.exception("Ошибка обработки апдейта %s: %s", u.get("update_id"), ex)
-        bot.s.set_state("last_update_id", u["update_id"])
-    return len(updates)
+        last = u["update_id"]
+        bot.s.set_state("last_update_id", last)
+        n += 1
+    return n
+
+
+def poll(bot: FoodBot, tg: Telegram, timeout=0) -> int:
+    offset = int(to_num(bot.s.state.get("last_update_id"), 0)) + 1
+    return handle_all(bot, tg.get_updates(offset, timeout=timeout))
+
+
+def receiver_alive(stamp, minutes=10) -> bool:
+    """Приёмщик (Apps Script) отметился недавно — значит, сообщения забирает он."""
+    try:
+        t = datetime.fromisoformat(str(stamp).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return datetime.now(timezone.utc) - t < timedelta(minutes=minutes)
+
+
+def step(bot: FoodBot, store):
+    if bot.chat_id:
+        bot.process_new()   # сразу разобрать новые записи и ответить
+        bot.tick()          # вечерние вопросы, отчёты, поправки
+    store.flush()
 
 
 def main():
@@ -59,10 +85,17 @@ def main():
                 web_search=str(store.setting("web_search")).strip().lower() in ("да", "yes", "1", "true"))
     bot = FoodBot(store, tg, ai, env("TELEGRAM_CHAT_ID", required=False))
 
+    if receiver_alive(store.state.get("receiver")):
+        # Режим «приёмщика»: Apps Script раз в минуту забирает сообщения у Telegram,
+        # складывает их в лист «Входящие» и запускает этот workflow.
+        handle_all(bot, [x["update"] for x in store.inbox])
+        step(bot, store)
+        log.info("Готово (приёмщик)")
+        return
+
+    # Режим без приёмщика: забираем сообщения у Telegram сами.
     poll(bot, tg)
-    if bot.chat_id:
-        bot.tick()
-    store.flush()
+    step(bot, store)
 
     # «Живое окно»: если бот только что задал вопросы или ты что-то ответил,
     # он ещё несколько минут слушает ответы в реальном времени.
@@ -75,8 +108,7 @@ def main():
         if left <= 0:
             break
         if poll(bot, tg, timeout=left):
-            bot.tick()
-            store.flush()
+            step(bot, store)
     store.flush()
     log.info("Готово")
 

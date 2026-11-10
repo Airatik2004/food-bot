@@ -17,11 +17,13 @@ SHEET_DICT = "Справочник"
 SHEET_NORMS = "Нормы"
 SHEET_SETTINGS = "Настройки"
 SHEET_STATE = "Служебное"
+SHEET_PURCHASES = "Покупки"
+SHEET_INBOX = "Входящие"
 
-# Порядок колонок листа «Записи» (A..AD)
+# Порядок колонок листа «Записи» (A..AF)
 ENTRY_COLS = ["id", "day", "time", "kind", "text", "item", "place", "variant",
               "amount", "grams", *NUTRIENTS, "status", "question", "answers",
-              "source", "msg_id", "question_msg_id", "file_id"]
+              "source", "msg_id", "question_msg_id", "file_id", "media_group", "options"]
 
 # Порядок колонок листа «Итоги» (A..S). C..P заполняются формулами.
 DAY_COLS = ["day", "phase", *NUTRIENTS, "approx", "report_at", "last_reminder",
@@ -30,6 +32,9 @@ DAY_COLS = ["day", "phase", *NUTRIENTS, "approx", "report_at", "last_reminder",
 # Порядок колонок листа «Справочник» (A..T)
 DICT_COLS = ["place", "item", "variant", "portion", "grams", *NUTRIENTS,
              "source", "added"]
+
+# Лист «Покупки» (A..E) — товары из чеков, подсказка для будущих записей
+PURCHASE_COLS = ["date", "name", "brand", "amount", "grams"]
 
 STATE_KEYS = ["last_update_id", "current_day", "awaiting"]
 
@@ -41,6 +46,8 @@ OK = "ок"
 APPROX = "примерно"      # уточнения не было, оценка
 NOT_FOOD = "не еда"
 ANSWER = "ответ"         # сообщение оказалось ответом на вопрос
+RECEIPT = "чек"          # чек: покупки сохранены, в съеденное не идёт
+CHANGED = "изменено"     # сообщение отредактировано, вместо строки — новая
 OPEN = (NEW, NEED_ASK, WAITING)
 FOOD_DONE = (OK, APPROX)
 

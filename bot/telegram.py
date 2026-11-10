@@ -27,7 +27,8 @@ class Telegram:
 
     def get_updates(self, offset: int, timeout: int = 0):
         return self.call("getUpdates", http_timeout=timeout + 15, offset=offset,
-                         timeout=timeout, allowed_updates=["message", "callback_query"])
+                         timeout=timeout,
+                         allowed_updates=["message", "edited_message", "callback_query"])
 
     def send(self, chat_id, text, reply_to=None, buttons=None):
         """buttons: список строк кнопок [[(текст, callback_data), ...], ...]"""

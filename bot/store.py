@@ -8,9 +8,9 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from .schema import (DAY_COLS, DICT_COLS, ENTRY_COLS, NUTRIENTS, SHEET_DAYS,
-                     SHEET_DICT, SHEET_ENTRIES, SHEET_NORMS, SHEET_SETTINGS,
-                     SHEET_STATE, STATE_KEYS, COLLECT, col_letter)
+from .schema import (COLLECT, DAY_COLS, DICT_COLS, ENTRY_COLS, NUTRIENTS, PURCHASE_COLS,
+                     SHEET_DAYS, SHEET_DICT, SHEET_ENTRIES, SHEET_INBOX, SHEET_NORMS,
+                     SHEET_PURCHASES, SHEET_SETTINGS, SHEET_STATE, STATE_KEYS, col_letter)
 
 
 class Formula(str):
@@ -50,6 +50,10 @@ DEFAULT_SETTINGS = {
 }
 
 
+def _next_row(rows):
+    return max([x["_row"] for x in rows] + [1]) + 1
+
+
 class Store:
     def __init__(self):
         self.settings: dict = dict(DEFAULT_SETTINGS)
@@ -57,10 +61,14 @@ class Store:
         self.entries: list[dict] = []
         self.days: list[dict] = []
         self.dictionary: list[dict] = []
+        self.purchases: list[dict] = []
+        self.inbox: list[dict] = []      # update_id, update (dict)
         self.state: dict = {"last_update_id": 0, "current_day": "", "awaiting": ""}
+        self.formula_sep = ","
         self._dirty_entries: set[int] = set()
         self._dirty_days: set[str] = set()
         self._new_dict: list[dict] = []
+        self._new_purchases: list[dict] = []
         self._state_dirty = False
 
     # ---------- записи ----------
@@ -71,7 +79,7 @@ class Store:
         e = {c: "" for c in ENTRY_COLS}
         e.update(fields)
         e["id"] = self.next_entry_id()
-        e["_row"] = max([x["_row"] for x in self.entries] + [1]) + 1
+        e["_row"] = _next_row(self.entries)
         self.entries.append(e)
         self._dirty_entries.add(e["id"])
         return e
@@ -99,7 +107,7 @@ class Store:
         d = {c: "" for c in DAY_COLS}
         d["day"] = day
         d["phase"] = COLLECT
-        d["_row"] = max([x["_row"] for x in self.days] + [1]) + 1
+        d["_row"] = _next_row(self.days)
         self.days.append(d)
         self._dirty_days.add(day)
         return d
@@ -107,14 +115,21 @@ class Store:
     def touch_day(self, d: dict):
         self._dirty_days.add(d["day"])
 
-    # ---------- справочник ----------
+    # ---------- справочник и покупки ----------
     def add_dict(self, item: dict):
         row = {c: "" for c in DICT_COLS}
         row.update({k: v for k, v in item.items() if k in DICT_COLS})
         row["added"] = item.get("added") or datetime.now().strftime("%Y-%m-%d")
-        row["_row"] = max([x["_row"] for x in self.dictionary] + [1]) + 1
+        row["_row"] = _next_row(self.dictionary)
         self.dictionary.append(row)
         self._new_dict.append(row)
+        return row
+
+    def add_purchase(self, item: dict):
+        row = {c: item.get(c, "") for c in PURCHASE_COLS}
+        row["_row"] = _next_row(self.purchases)
+        self.purchases.append(row)
+        self._new_purchases.append(row)
         return row
 
     # ---------- служебное ----------
@@ -126,10 +141,15 @@ class Store:
     def setting(self, key):
         return self.settings.get(key, DEFAULT_SETTINGS.get(key))
 
+    def processed_inbox(self, last_update_id):
+        """Отметить, что входящие до last_update_id обработаны (в памяти)."""
+        self.inbox = [x for x in self.inbox if x["update_id"] > last_update_id]
+
     def flush(self):
         self._dirty_entries.clear()
         self._dirty_days.clear()
         self._new_dict.clear()
+        self._new_purchases.clear()
         self._state_dirty = False
 
 
@@ -144,18 +164,23 @@ def _rows_to_dicts(rows, cols):
     return out
 
 
-def day_formulas(row: int) -> dict:
-    """Формулы итогов дня: суммы по листу «Записи» за этот день."""
+def day_formulas(row: int, sep: str = ",") -> dict:
+    """Формулы итогов дня: суммы по листу «Записи» за этот день.
+    sep — разделитель аргументов: «;» для русской локали таблицы, «,» для английской."""
     f = {}
     src_start = ENTRY_COLS.index("kcal")
     for i, n in enumerate(NUTRIENTS):
         letter = col_letter(src_start + i)
-        f[n] = Formula(f"=SUMIFS('{SHEET_ENTRIES}'!{letter}:{letter},"
-                       f"'{SHEET_ENTRIES}'!$B:$B,$A{row})")
+        f[n] = Formula(f"=SUMIFS('{SHEET_ENTRIES}'!{letter}:{letter}{sep}"
+                       f"'{SHEET_ENTRIES}'!$B:$B{sep}$A{row})")
     st = col_letter(ENTRY_COLS.index("status"))
-    f["approx"] = Formula(f"=COUNTIFS('{SHEET_ENTRIES}'!$B:$B,$A{row},"
-                          f"'{SHEET_ENTRIES}'!${st}:${st},\"примерно\")")
+    f["approx"] = Formula(f"=COUNTIFS('{SHEET_ENTRIES}'!$B:$B{sep}$A{row}{sep}"
+                          f"'{SHEET_ENTRIES}'!${st}:${st}{sep}\"примерно\")")
     return f
+
+
+# Локали, где запятая — разделитель дробей, и аргументы формул пишутся через «;»
+_DOT_LOCALES = ("en", "ja", "zh", "ko", "th", "he", "hi", "ms", "fil", "ga")
 
 
 class SheetStore(Store):
@@ -165,25 +190,40 @@ class SheetStore(Store):
         self.gc = gspread.service_account_from_dict(service_account_info)
         self.sh = self.gc.open_by_key(spreadsheet_id)
         self.row_counts = {}
+        self.sheet_ids = {}
 
     def load(self):
-        for ws in self.sh.worksheets():
-            self.row_counts[ws.title] = ws.row_count
-        ranges = [f"'{SHEET_ENTRIES}'!A:AD", f"'{SHEET_DAYS}'!A:S",
+        meta = self.sh.fetch_sheet_metadata(
+            {"fields": "properties.locale,sheets.properties"})
+        locale = str(meta.get("properties", {}).get("locale", "en_US"))
+        self.formula_sep = "," if locale.split("_")[0] in _DOT_LOCALES else ";"
+        for s in meta.get("sheets", []):
+            p = s["properties"]
+            self.row_counts[p["title"]] = p.get("gridProperties", {}).get("rowCount", 1000)
+            self.sheet_ids[p["title"]] = p["sheetId"]
+        self._ensure_sheets()
+
+        ranges = [f"'{SHEET_ENTRIES}'!A:AF", f"'{SHEET_DAYS}'!A:S",
                   f"'{SHEET_DICT}'!A:T", f"'{SHEET_NORMS}'!A:E",
-                  f"'{SHEET_SETTINGS}'!A:B", f"'{SHEET_STATE}'!A:B"]
+                  f"'{SHEET_SETTINGS}'!A:B", f"'{SHEET_STATE}'!A:B",
+                  f"'{SHEET_PURCHASES}'!A:E", f"'{SHEET_INBOX}'!A:C"]
         res = self.sh.values_batch_get(
             ranges, params={"valueRenderOption": "UNFORMATTED_VALUE"})
         vr = [x.get("values", []) for x in res["valueRanges"]]
-        entries, days, dct, norms, settings, state = vr
+        entries, days, dct, norms, settings, state, purchases, inbox = vr
+        if entries and len(entries[0]) < len(ENTRY_COLS):  # заголовки новых колонок
+            self.sh.values_batch_update(body={"valueInputOption": "RAW", "data": [
+                {"range": f"'{SHEET_ENTRIES}'!AE1:AF1", "values": [["Группа фото", "Варианты"]]}]})
         self.entries = _rows_to_dicts(entries, ENTRY_COLS)
         for e in self.entries:
-            for k in ("day", "time", "question_msg_id", "file_id", "text"):
+            for k in ("day", "time", "question_msg_id", "file_id", "text", "media_group",
+                      "options", "source", "status"):
                 e[k] = str(e[k])
         self.days = _rows_to_dicts(days, DAY_COLS)
         for d in self.days:
             d["day"] = str(d["day"])
         self.dictionary = _rows_to_dicts(dct, DICT_COLS)
+        self.purchases = _rows_to_dicts(purchases, PURCHASE_COLS)
         self.norms = []
         for r in norms[1:]:
             if len(r) >= 4 and str(r[0]).strip():
@@ -197,7 +237,35 @@ class SheetStore(Store):
             if len(r) >= 1 and str(r[0]).strip():
                 self.state[str(r[0]).strip()] = r[1] if len(r) > 1 else ""
         self.state["last_update_id"] = to_num(self.state.get("last_update_id"), 0)
+        self.inbox = []
+        self._inbox_rows = []
+        for i, r in enumerate(inbox[1:], start=2):
+            uid = to_num(r[0] if r else None)
+            if uid is None or len(r) < 3:
+                continue
+            try:
+                upd = json.loads(str(r[2]))
+            except json.JSONDecodeError:
+                continue
+            self.inbox.append({"update_id": int(uid), "update": upd})
+            self._inbox_rows.append((i, int(uid)))
         return self
+
+    def _ensure_sheets(self):
+        """Создать новые листы, если таблица от старой версии бота."""
+        need = {SHEET_PURCHASES: ["Дата", "Товар", "Бренд / магазин", "Количество", "Граммы"],
+                SHEET_INBOX: ["update_id", "Получено", "JSON"]}
+        missing = [t for t in need if t not in self.sheet_ids]
+        if missing:
+            res = self.sh.batch_update({"requests": [
+                {"addSheet": {"properties": {"title": t, "gridProperties": {"frozenRowCount": 1}}}}
+                for t in missing]})
+            for rep in res.get("replies", []):
+                p = rep["addSheet"]["properties"]
+                self.sheet_ids[p["title"]] = p["sheetId"]
+                self.row_counts[p["title"]] = p["gridProperties"]["rowCount"]
+            self.sh.values_batch_update(body={"valueInputOption": "RAW", "data": [
+                {"range": f"'{t}'!A1", "values": [need[t]]} for t in missing]})
 
     def _ensure_rows(self, title, need):
         have = self.row_counts.get(title, 1000)
@@ -208,10 +276,11 @@ class SheetStore(Store):
 
     def flush(self):
         data = []
+        last_col = col_letter(len(ENTRY_COLS) - 1)
         for e in self.entries:
             if e["id"] in self._dirty_entries:
                 r = e["_row"]
-                data.append({"range": f"'{SHEET_ENTRIES}'!A{r}:{col_letter(len(ENTRY_COLS)-1)}{r}",
+                data.append({"range": f"'{SHEET_ENTRIES}'!A{r}:{last_col}{r}",
                              "values": [[to_cell(e.get(c)) for c in ENTRY_COLS]]})
         if self.entries:
             self._ensure_rows(SHEET_ENTRIES, max(e["_row"] for e in self.entries))
@@ -219,13 +288,19 @@ class SheetStore(Store):
             if d["day"] in self._dirty_days:
                 r = d["_row"]
                 row = dict(d)
-                row.update(day_formulas(r))
+                row.update(day_formulas(r, self.formula_sep))
                 data.append({"range": f"'{SHEET_DAYS}'!A{r}:{col_letter(len(DAY_COLS)-1)}{r}",
                              "values": [[to_cell(row.get(c)) for c in DAY_COLS]]})
         for x in self._new_dict:
             r = x["_row"]
             data.append({"range": f"'{SHEET_DICT}'!A{r}:{col_letter(len(DICT_COLS)-1)}{r}",
                          "values": [[to_cell(x.get(c)) for c in DICT_COLS]]})
+        if self._new_purchases:
+            self._ensure_rows(SHEET_PURCHASES, max(x["_row"] for x in self.purchases))
+        for x in self._new_purchases:
+            r = x["_row"]
+            data.append({"range": f"'{SHEET_PURCHASES}'!A{r}:E{r}",
+                         "values": [[to_cell(x.get(c)) for c in PURCHASE_COLS]]})
         if self._state_dirty:
             vals = [[k, to_cell(self.state.get(k, ""))] for k in STATE_KEYS]
             vals[0][1] = to_num(self.state.get("last_update_id"), 0)
@@ -233,7 +308,23 @@ class SheetStore(Store):
         if data:
             self.sh.values_batch_update(
                 body={"valueInputOption": "USER_ENTERED", "data": data})
+        self._trim_inbox()
         super().flush()
+
+    def _trim_inbox(self):
+        """Удалить из «Входящих» обработанные строки в начале листа.
+        Новые строки приёмщик дописывает в конец, поэтому удалять начало безопасно."""
+        last = int(to_num(self.state.get("last_update_id"), 0))
+        n = 0
+        for i, (row, uid) in enumerate(getattr(self, "_inbox_rows", [])):
+            if row != i + 2 or uid > last:
+                break
+            n += 1
+        if n:
+            self.sh.batch_update({"requests": [{"deleteDimension": {"range": {
+                "sheetId": self.sheet_ids[SHEET_INBOX], "dimension": "ROWS",
+                "startIndex": 1, "endIndex": 1 + n}}}]})
+            self._inbox_rows = [(r - n, u) for r, u in self._inbox_rows[n:]]
 
 
 def load_service_account(raw: str) -> dict:

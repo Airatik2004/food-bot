@@ -56,6 +56,18 @@ RULES = f"""Ты помощник дневника питания. Пользо�
   Чайхона №1, магазинные продукты), найди значения на сайте через поиск, source="сайт"; иначе оцени сам,
   source="оценка".
 
+История — что пользователь ел в последние дни. Если он ссылается на прошлое («как вчера», «тот же»,
+«вчера был он же», «как обычно»), возьми место, вариант и размер из истории и НЕ переспрашивай то,
+что там уже есть.
+
+Покупки — товары из недавних чеков. Если запись подходит к купленному товару («творог» → в покупках
+«Творог с малиной 5% Верейский, 140 г»), используй бренд и вес оттуда.
+
+ЧЕКИ. Чек (фото чека, скриншот заказа, список покупок) — это то, что КУПЛЕНО, а не съедено.
+Товары из чека перечисли в receipt. В items клади только то, что пользователь явно назвал съеденным
+(например, подпись «хлеб не всю пачку, а 4 штуки» → в items только хлеб, 4 куска, бренд и вид из чека).
+Если подпись ничего не говорит о съеденном — items пустой.
+
 Вопрос — один на позицию, коротко, на «ты», можно объединить несколько недостающих деталей.
 Даже если данных не хватает, заполни nutrients лучшей оценкой для типичной порции.
 nutrients — на всё съеденное количество, не на 100 г. Единицы: {NUTR_DOC}.
@@ -67,6 +79,12 @@ ANALYZE_TASK = """Новая запись пользователя (отправ
 Справочник (номер | место | блюдо | вариант | порция | ккал):
 {dictionary}
 
+История за последние дни (дата время | блюдо | место | вариант | количество | ккал):
+{history}
+
+Покупки из недавних чеков (дата | товар | бренд/магазин | количество):
+{purchases}
+
 Открытые вопросы бота, на которые пользователь ещё не ответил (id | позиция | вопрос):
 {open_questions}
 Если сообщение — это не новая еда, а ответ на один из этих вопросов, верни answer_to = id этого вопроса
@@ -74,10 +92,12 @@ ANALYZE_TASK = """Новая запись пользователя (отправ
 
 Верни JSON:
 {{
-  "transcript": "текст записи (для голосового — расшифровка, для фото — что на нём)",
+  "transcript": "для голосового — расшифровка; для фото — коротко, что на нём (без повтора подписи)",
   "answer_to": null,
+  "receipt": [ {{"name": "товар", "brand": "бренд или магазин", "amount": "250 г / 1 шт", "grams": 250}} ],
   "items": [ {item_schema} ]
-}}"""
+}}
+receipt — только если это чек или список покупок, иначе пустой список."""
 
 REFINE_TASK = """Ранее ты разобрал запись пользователя и задал уточняющий вопрос. Пользователь ответил.
 Исходная запись: {text}
@@ -89,7 +109,13 @@ REFINE_TASK = """Ранее ты разобрал запись пользова�
 Справочник (номер | место | блюдо | вариант | порция | ккал):
 {dictionary}
 
-Обнови позицию с учётом ответа. Если данных всё ещё не хватает — complete=false и новый вопрос.
+История за последние дни (дата время | блюдо | место | вариант | количество | ккал):
+{recent}
+
+Покупки из недавних чеков (дата | товар | бренд/магазин | количество):
+{purchases}
+
+Обнови позицию с учётом ответа. Ответ может ссылаться на историю («как вчера», «тот же»). Если данных всё ещё не хватает — complete=false и новый вопрос.
 Если пользователь говорит «не знаю»/«примерно» — оцени сам и поставь complete=true.
 Верни JSON:
 {{
@@ -143,22 +169,29 @@ class Gemini:
                 log.warning("Не разобрал ответ Gemini: %s", ex)
         raise RuntimeError(f"Gemini не ответил: {last_err}")
 
-    def analyze(self, time_str, text, media, dictionary_text, open_q_text) -> dict:
+    def analyze(self, time_str, text, media, dictionary_text, open_q_text,
+                history_text="", purchases_text="") -> dict:
         text_block = f"Текст: {text}" if text else "Текста нет, см. вложение."
         prompt = ANALYZE_TASK.format(time=time_str, text_block=text_block,
                                      dictionary=dictionary_text or "(пусто)",
+                                     history=history_text or "(пусто)",
+                                     purchases=purchases_text or "(пусто)",
                                      open_questions=open_q_text or "(нет)",
                                      item_schema=ITEM_SCHEMA)
         res = self.ask([{"text": prompt}] + media_parts(media))
-        res.setdefault("items", [])
-        res["items"] = [normalize_item(i) for i in res["items"] if isinstance(i, dict)]
+        res["items"] = [normalize_item(i) for i in (res.get("items") or []) if isinstance(i, dict)]
+        res["receipt"] = [normalize_purchase(i) for i in (res.get("receipt") or [])
+                          if isinstance(i, dict) and i.get("name")]
         return res
 
-    def refine(self, text, item, history, answer_text, media, dictionary_text) -> dict:
+    def refine(self, text, item, history, answer_text, media, dictionary_text,
+               recent_text="", purchases_text="") -> dict:
         answer_block = answer_text if answer_text else "(голосовое, см. вложение)"
         prompt = REFINE_TASK.format(text=text, item=json.dumps(item, ensure_ascii=False),
                                     history=history or "(нет)", answer_block=answer_block,
                                     dictionary=dictionary_text or "(пусто)",
+                                    recent=recent_text or "(пусто)",
+                                    purchases=purchases_text or "(пусто)",
                                     item_schema=ITEM_SCHEMA)
         res = self.ask([{"text": prompt}] + media_parts(media))
         res["item"] = normalize_item(res.get("item") or {})
@@ -198,6 +231,11 @@ def _num(v):
         return round(float(v), 1)
     except (TypeError, ValueError):
         return 0
+
+
+def normalize_purchase(i: dict) -> dict:
+    return {"name": str(i.get("name") or "").strip(), "brand": str(i.get("brand") or "").strip(),
+            "amount": str(i.get("amount") or "").strip(), "grams": _num(i.get("grams"))}
 
 
 def normalize_item(i: dict) -> dict:

@@ -1,4 +1,4 @@
-"""Логика бота: дни, уточнения, отчёты."""
+"""Логика бота: разбор записей, вопросы, дни, отчёты."""
 from __future__ import annotations
 
 import logging
@@ -6,8 +6,8 @@ import re
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from .schema import (ANSWER, APPROX, ASKING, CLOSED, COLLECT, FOOD_DONE, NEED_ASK,
-                     NEW, NOT_FOOD, NUTRIENT_NAMES, NUTRIENTS, OK, OPEN, REPORTED,
+from .schema import (ANSWER, APPROX, ASKING, CHANGED, CLOSED, COLLECT, FOOD_DONE, NEED_ASK,
+                     NEW, NOT_FOOD, NUTRIENT_NAMES, NUTRIENTS, OK, OPEN, RECEIPT, REPORTED,
                      WAITING)
 from .store import Store, to_num
 
@@ -17,20 +17,21 @@ MSK = ZoneInfo("Europe/Moscow")
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
           "сентября", "октября", "ноября", "декабря"]
 WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
-DAY_FALLBACK_CLOSE = "12:00"  # если утром ничего не писал, день всё равно закрывается
+COUNTED = FOOD_DONE + (NEED_ASK, WAITING)   # что входит в «итого за день» (с оценкой)
+RECEIPT_SRC = "чек"
 
 HELP = """Привет! Я записываю, что ты ешь, и считаю КБЖУ.
 
-Как пользоваться:
-• Днём просто пиши или говори голосом: «сырный суп из ВкусВилла», «раф из Surf 400 мл». Можно фото этикетки.
-• Днём я молчу. В {ask} пришлю вопросы по тому, чего не хватает (граммы, место, вкус...). Отвечай реплаем на вопрос или кнопкой.
-• Отчёт приходит в {report}, когда всё уточнено. Напоминаю до {deadline}, потом отчёт с пометкой «примерно».
-• Новый день начинается с первого сообщения после {start}. Ночные перекусы идут во вчера, утром пришлю поправку.
+• Пиши или говори голосом: «сырный суп из ВкусВилла», «раф из Surf 400 мл». Можно фото блюда или этикетки.
+• На каждую запись отвечаю разбором и калориями. Если чего-то не хватает (граммы, место, вкус), сразу спрошу — отвечай кнопкой или реплаем. Можно «как вчера».
+• Чек: пришли фото — сохраню покупки и спрошу, что из этого ты съел. В подписи можно сразу написать: «съел хлеб, 4 куска».
+• Ошибся — просто отредактируй сообщение, я пересчитаю.
+• В {ask} доспрошу неотвеченное, отчёт — в {report}, когда всё уточнено. Напоминаю до {deadline}, потом считаю «примерно».
+• Новый день начинается в {start}: всё, что съел ночью, идёт во вчера.
 
 Команды:
 /report — промежуточный отчёт за сегодня
-/status — что ждёт уточнения
-/newday — начать новый день сейчас (если не спал)"""
+/status — что ждёт уточнения"""
 
 
 def hhmm(s, default="00:00") -> time:
@@ -59,13 +60,11 @@ def fmt_day(day: str) -> str:
     return f"{WEEKDAYS[d.weekday()]}, {d.day} {MONTHS[d.month - 1]}"
 
 
-def assign_day(ts: datetime, current_day: str, day_start: time) -> str:
-    """Логический день: новый день начинается с первого сообщения после day_start."""
-    cand = ts.date() if ts.timetz().replace(tzinfo=None) >= day_start else ts.date() - timedelta(days=1)
-    if not current_day:
-        return cand.isoformat()
-    cur = d_(current_day)
-    return cand.isoformat() if cand > cur else cur.isoformat()
+def assign_day(ts: datetime, day_start: time) -> str:
+    """Логический день: сутки начинаются в day_start (по умолчанию 05:00)."""
+    t = ts.astimezone(MSK)
+    d = t.date() if t.time() >= day_start else t.date() - timedelta(days=1)
+    return d.isoformat()
 
 
 def fmt_num(v, unit):
@@ -83,6 +82,7 @@ class FoodBot:
         self.chat_id = str(chat_id) if chat_id else ""
         self.now_fn = now_fn or (lambda: datetime.now(MSK))
         self._reopened = False
+        self.edited_ids: set = set()
         self.activity = False       # пользователь что-то прислал в этом запуске
         self.asked = False          # бот задал вопросы в этом запуске
 
@@ -98,7 +98,10 @@ class FoodBot:
         return self.now_fn()
 
     def stamp(self, dt=None) -> str:
-        return (dt or self.now()).strftime("%Y-%m-%d %H:%M")
+        return (dt or self.now()).astimezone(MSK).strftime("%Y-%m-%d %H:%M")
+
+    def today(self) -> str:
+        return assign_day(self.now(), self.t("day_start"))
 
     def send(self, text, **kw):
         return self.tg.send(self.chat_id, text, **kw)
@@ -111,31 +114,42 @@ class FoodBot:
                 return
             self.activity = True
             self.handle_callback(cq)
-        elif "message" in u:
-            m = u["message"]
-            chat = str(m.get("chat", {}).get("id"))
-            if not self.chat_id:
-                self.tg.send(chat, f"Твой chat id: {chat}\nДобавь его в секрет TELEGRAM_CHAT_ID на GitHub.")
-                return
-            if chat != self.chat_id:
-                log.info("Сообщение из чужого чата %s — пропускаю", chat)
-                return
-            self.activity = True
+            return
+        m = u.get("message") or u.get("edited_message")
+        if not m:
+            return
+        chat = str(m.get("chat", {}).get("id"))
+        if not self.chat_id:
+            self.tg.send(chat, f"Твой chat id: {chat}\nДобавь его в секрет TELEGRAM_CHAT_ID на GitHub.")
+            return
+        if chat != self.chat_id:
+            log.info("Сообщение из чужого чата %s — пропускаю", chat)
+            return
+        self.activity = True
+        if "edited_message" in u:
+            self.handle_edit(m)
+        else:
             self.handle_message(m)
+
+    @staticmethod
+    def parse_media(m):
+        if m.get("voice"):
+            return "голос", m["voice"]["file_id"]
+        if m.get("audio"):
+            return "аудио", m["audio"]["file_id"]
+        if m.get("photo"):
+            return "фото", m["photo"][-1]["file_id"]
+        if m.get("document") and str(m["document"].get("mime_type", "")).startswith("image/"):
+            return "фото", m["document"]["file_id"]
+        return "текст", ""
 
     def handle_message(self, m: dict):
         text = (m.get("text") or m.get("caption") or "").strip()
         if text.startswith("/"):
             return self.command(text.split()[0].split("@")[0].lower())
         ts = datetime.fromtimestamp(m["date"], MSK)
-        kind, file_id = "текст", ""
-        if m.get("voice"):
-            kind, file_id = "голос", m["voice"]["file_id"]
-        elif m.get("audio"):
-            kind, file_id = "аудио", m["audio"]["file_id"]
-        elif m.get("photo"):
-            kind, file_id = "фото", m["photo"][-1]["file_id"]
-        elif not text:
+        kind, file_id = self.parse_media(m)
+        if kind == "текст" and not text:
             self.send("Я понимаю текст, голосовые и фото 🙂", reply_to=m["message_id"])
             return
 
@@ -148,17 +162,61 @@ class FoodBot:
             target = self.s.entry(self.s.state["awaiting"])
             if target and target["status"] != WAITING:
                 target = None
+        if target and target.get("source") == RECEIPT_SRC:
+            self.receipt_answer(target, text, kind, file_id, m["message_id"])
+            return
         if target:
-            media = self.media(kind, file_id)
-            self.apply_answer(target, text, media, reply_to=m["message_id"])
+            self.apply_answer(target, text, self.media(kind, file_id), reply_to=m["message_id"])
             return
 
-        day = assign_day(ts, self.s.state.get("current_day", ""), self.t("day_start"))
-        if day != self.s.state.get("current_day"):
-            self.s.set_state("current_day", day)
+        # Альбом: несколько фото одним сообщением (например, длинный чек)
+        group = str(m.get("media_group_id") or "")
+        if group:
+            for e in self.s.entries:
+                if e.get("media_group") == group and e["status"] == NEW:
+                    e["file_id"] = ",".join(x for x in [e["file_id"], file_id] if x)
+                    if text:
+                        e["text"] = (e["text"] + " " + text).strip()
+                    self.s.touch(e)
+                    return
+
+        day = assign_day(ts, self.t("day_start"))
         self.s.day(day)  # создать строку дня, если её нет
+        if day > str(self.s.state.get("current_day") or ""):
+            self.s.set_state("current_day", day)
         self.s.add_entry(day=day, time=self.stamp(ts), kind=kind, text=text, status=NEW,
-                         msg_id=m["message_id"], file_id=file_id)
+                         msg_id=m["message_id"], file_id=file_id, media_group=group)
+
+    def handle_edit(self, m: dict):
+        """Отредактированное сообщение: старые строки помечаем «изменено», запись разбираем заново."""
+        mid = m["message_id"]
+        text = (m.get("text") or m.get("caption") or "").strip()
+        rows = [e for e in self.s.entries if str(e.get("msg_id")) == str(mid)
+                and e["status"] not in (CHANGED, ANSWER)]
+        if not rows:
+            return  # правка ответа на вопрос или чужого сообщения — игнорируем
+        first = rows[0]
+        if all(e["status"] == NEW for e in rows):
+            first["text"] = text
+            self.s.touch(first)
+            return
+        for e in rows:
+            e["status"] = CHANGED
+            for k in NUTRIENTS:
+                e[k] = ""
+            self.s.touch(e)
+            if str(self.s.state.get("awaiting")) == str(e["id"]):
+                self.s.set_state("awaiting", "")
+        kind, file_id = self.parse_media(m)
+        new = self.s.add_entry(day=first["day"], time=first["time"], kind=first["kind"],
+                               text=text, status=NEW, msg_id=mid,
+                               file_id=first.get("file_id") or file_id,
+                               media_group=first.get("media_group", ""))
+        self.edited_ids.add(new["id"])
+        d = self.s.day(first["day"])
+        if d["phase"] == CLOSED:
+            d["phase"] = REPORTED
+            self.s.touch_day(d)
 
     def handle_callback(self, cq: dict):
         data = cq.get("data", "")
@@ -189,18 +247,9 @@ class FoodBot:
         if cmd in ("/start", "/help"):
             self.send(HELP.format(ask=self.s.setting("ask_time"), report=self.s.setting("report_time"),
                                   deadline=self.s.setting("deadline"), start=self.s.setting("day_start")))
-        elif cmd == "/newday":
-            day = self.now().date().isoformat()
-            self.s.set_state("current_day", day)
-            self.s.day(day)
-            self.send(f"Начал новый день: {fmt_day(day)}. Всё, что было раньше, — во вчерашнем.")
         elif cmd == "/report":
-            day = self.s.state.get("current_day")
-            if not day:
-                self.send("Сегодня ещё нет записей.")
-                return
-            self.analyze_pending(day)
-            self.send(self.report_text(day, preview=True))
+            self.process_new()
+            self.send(self.report_text(self.today(), preview=True))
         elif cmd == "/status":
             open_ = [e for e in self.s.entries if e["status"] in OPEN]
             if not open_:
@@ -208,6 +257,8 @@ class FoodBot:
             else:
                 lines = [f"• {e['day']}: {self.label(e) or e['text'][:40]} — {e['status']}" for e in open_]
                 self.send("Ждут разбора или ответа:\n" + "\n".join(lines))
+        elif cmd == "/newday":
+            self.send(f"Теперь новый день начинается сам в {self.s.setting('day_start')}.")
         else:
             self.send("Не знаю такой команды. /help")
 
@@ -225,71 +276,126 @@ class FoodBot:
         e["question_msg_id"] = ",".join(ids)
         self.s.touch(e)
 
-    def send_questions(self, day):
-        for e in self.s.entries_of(day):
-            if e["status"] != NEED_ASK:
-                continue
-            buttons = [[(o, f"o:{e['id']}:{k}")] for k, o in enumerate(e.get("_options") or [])]
-            buttons.append([("Другой / свой ответ ✏️", f"x:{e['id']}")])
-            r = self.send(f"❓ {self.label(e)}\n{e['question']}", reply_to=e["msg_id"] or None,
-                          buttons=buttons)
-            self.add_question_id(e, r["message_id"])
-            e["status"] = WAITING
-            self.asked = True
+    def ask(self, e, prefix=""):
+        opts = [o for o in str(e.get("options") or "").split(" | ") if o]
+        buttons = [[(o, f"o:{e['id']}:{k}")] for k, o in enumerate(opts)]
+        buttons.append([("Другой / свой ответ ✏️", f"x:{e['id']}")])
+        head = "🧾" if e.get("source") == RECEIPT_SRC else "❓"
+        r = self.send(f"{prefix}{head} {self.label(e)}\n{e['question']}",
+                      reply_to=e["msg_id"] or None, buttons=buttons)
+        self.add_question_id(e, r["message_id"])
+        e["status"] = WAITING
+        self.asked = True
+
+    def send_questions(self, day=None):
+        for e in self.s.entries:
+            if e["status"] == NEED_ASK and (day is None or e["day"] == day):
+                self.ask(e)
 
     def open_questions_text(self):
         return "\n".join(f"{e['id']} | {self.label(e)} | {e['question']}"
                          for e in self.s.entries if e["status"] == WAITING)
 
-    # ---------------- разбор ИИ ----------------
+    # ---------------- контекст для ИИ ----------------
     def dictionary_text(self):
         rows = self.s.dictionary[-400:]
         return "\n".join(f"{r['_row']} | {r['place']} | {r['item']} | {r['variant']} | "
                          f"{r['portion']} | {r['kcal']}" for r in rows)
 
-    def media(self, kind, file_id):
-        if not file_id:
-            return []
-        mime = {"голос": "audio/ogg", "аудио": "audio/mpeg", "фото": "image/jpeg"}.get(kind)
-        try:
-            return [(self.tg.download(file_id), mime)]
-        except Exception as ex:
-            log.warning("Не скачал файл: %s", ex)
-            return []
+    def history_text(self, days=4):
+        since = (d_(self.today()) - timedelta(days=days)).isoformat()
+        rows = [e for e in self.s.entries if e["status"] in FOOD_DONE and e["day"] >= since]
+        return "\n".join(f"{e['time']} | {e['item']} | {e['place']} | {e['variant']} | "
+                         f"{e['amount']} | {fmt_num(e['kcal'], 'ккал')}" for e in rows[-60:])
 
-    def analyze_pending(self, day):
-        for e in list(self.s.entries_of(day)):
-            if e["status"] == NEW:
-                try:
-                    self.analyze_entry(e)
-                except Exception as ex:
-                    log.exception("Ошибка разбора записи %s: %s", e["id"], ex)
+    def purchases_text(self, days=14):
+        since = (d_(self.today()) - timedelta(days=days)).isoformat()
+        rows = [p for p in self.s.purchases if str(p.get("date", "")) >= since]
+        return "\n".join(f"{p['date']} | {p['name']} | {p['brand']} | {p['amount']}"
+                         for p in rows[-80:])
+
+    def media(self, kind, file_ids):
+        out = []
+        mime = {"голос": "audio/ogg", "аудио": "audio/mpeg", "фото": "image/jpeg"}.get(kind)
+        for fid in [x for x in str(file_ids or "").split(",") if x]:
+            try:
+                out.append((self.tg.download(fid), mime))
+            except Exception as ex:
+                log.warning("Не скачал файл: %s", ex)
+        return out
+
+    # ---------------- разбор ----------------
+    def process_new(self):
+        """Разобрать все новые записи и сразу ответить на каждую."""
+        for e in sorted([x for x in self.s.entries if x["status"] == NEW],
+                        key=lambda x: to_num(x["id"], 0)):
+            try:
+                self.analyze_entry(e)
+            except Exception as ex:
+                log.exception("Ошибка разбора записи %s: %s", e["id"], ex)
 
     def analyze_entry(self, e):
         media = self.media(e["kind"], e.get("file_id"))
-        res = self.ai.analyze(e["time"][11:16], e["text"], media, self.dictionary_text(),
-                              self.open_questions_text())
+        caption = e["text"]
+        res = self.ai.analyze(e["time"][11:16], caption, media, self.dictionary_text(),
+                              self.open_questions_text(), self.history_text(),
+                              self.purchases_text())
         tr = str(res.get("transcript") or "").strip()
         if e["kind"] in ("голос", "аудио") and tr:
             e["text"] = "🎤 " + tr
         elif e["kind"] == "фото" and tr:
-            e["text"] = (e["text"] + " " if e["text"] else "") + f"[фото: {tr}]"
+            e["text"] = (caption + " " if caption else "") + f"[фото: {tr}]"
+
         target = self.s.entry(res.get("answer_to")) if res.get("answer_to") else None
         if target and target["status"] == WAITING:
             e["status"] = ANSWER
             self.s.touch(e)
-            self.apply_answer(target, tr or e["text"], [], reply_to=e["msg_id"])
+            self.apply_answer(target, tr or caption, [], reply_to=e["msg_id"])
             return
+
+        receipt = res.get("receipt") or []
+        for p in receipt:
+            self.s.add_purchase({"date": e["day"], **p})
         items = res.get("items") or []
+        edited = e["id"] in self.edited_ids
+
         if not items:
-            e["status"] = NOT_FOOD
-            self.s.touch(e)
+            if receipt:
+                e.update(item="Чек", source=RECEIPT_SRC, status=NEED_ASK, options="Ничего не ел",
+                         question=f"Сохранил покупки ({len(receipt)}): "
+                                  + ", ".join(p["name"] for p in receipt[:12])
+                                  + ("…" if len(receipt) > 12 else "")
+                                  + "\nЧто из этого ты уже съел и сколько? Если ничего — нажми кнопку.")
+                self.s.touch(e)
+                self.ask(e)
+            else:
+                e["status"] = NOT_FOOD
+                self.s.touch(e)
+                self.send("🤔 Не нашёл здесь еды. Если это еда — напиши подробнее.",
+                          reply_to=e["msg_id"])
             return
+
+        rows = []
         for i, it in enumerate(items):
             tgt = e if i == 0 else self.s.add_entry(
                 day=e["day"], time=e["time"], kind=e["kind"], text=e["text"],
-                msg_id=e["msg_id"], file_id=e.get("file_id", ""))
+                msg_id=e["msg_id"], file_id=e.get("file_id", ""), media_group=e.get("media_group", ""))
             self.apply_item(tgt, it)
+            rows.append(tgt)
+
+        head = "✏️ Исправил:" if edited else ("🧾 Покупки сохранил, в съеденное записал:" if receipt else "🍽")
+        lines = []
+        for r in rows:
+            approx = "~" if r["status"] != OK else ""
+            tail = "  ❓ уточню ниже" if r["status"] == NEED_ASK else ""
+            lines.append(f"• {self.label(r)} — {approx}{fmt_num(r['kcal'], 'ккал')} ккал "
+                         f"(Б {fmt_num(r['protein'], 'г')} · Ж {fmt_num(r['fat'], 'г')} · "
+                         f"У {fmt_num(r['carbs'], 'г')}){tail}")
+        self.send(f"{head}\n" + "\n".join(lines) + "\n" + self.day_total_line(e["day"]),
+                  reply_to=e["msg_id"])
+        for r in rows:
+            if r["status"] == NEED_ASK:
+                self.ask(r)
 
     def apply_item(self, e, it):
         e.update({k: it[k] for k in ("item", "place", "variant", "amount", "grams")})
@@ -307,12 +413,12 @@ class FoodBot:
             e[k] = nutr.get(k, 0)
         e["source"] = source
         if it["complete"]:
-            e["status"], e["question"] = OK, ""
+            e["status"], e["question"], e["options"] = OK, "", ""
             if source != "справочник" and e["place"] and e["place"].lower() != "дом":
                 self.save_to_dict(e)
         else:
             e["status"], e["question"] = NEED_ASK, it["question"]
-            e["_options"] = it["options"]
+            e["options"] = " | ".join(it["options"])
         if it.get("yesterday"):
             prev = (d_(e["day"]) - timedelta(days=1)).isoformat()
             e["day"] = prev
@@ -344,10 +450,15 @@ class FoodBot:
         self.s.add_dict(row)
 
     def apply_answer(self, e, text, media, reply_to=None):
+        if str(self.s.state.get("awaiting")) == str(e["id"]):
+            self.s.set_state("awaiting", "")
+        if e.get("source") == RECEIPT_SRC:
+            self.receipt_answer(e, text, "текст", "", reply_to)
+            return
         item_cur = {k: e.get(k) for k in ("item", "place", "variant", "amount", "grams")}
         try:
             res = self.ai.refine(e["text"], item_cur, e.get("answers") or "", text, media,
-                                 self.dictionary_text())
+                                 self.dictionary_text(), self.history_text(), self.purchases_text())
         except Exception as ex:
             log.exception("Ошибка уточнения: %s", ex)
             self.send("Не смог обработать ответ, попробую позже. Ответь ещё раз, пожалуйста.",
@@ -355,16 +466,36 @@ class FoodBot:
             return
         ans = str(res.get("answer_text") or text or "(голос)").strip()
         e["answers"] = (str(e.get("answers") or "") + f"В: {e['question']} — О: {ans}\n")
-        if str(self.s.state.get("awaiting")) == str(e["id"]):
-            self.s.set_state("awaiting", "")
         self.apply_item(e, res["item"])
         if e["status"] == OK:
-            self.send(f"✅ {self.label(e)} — {fmt_num(e['kcal'], 'ккал')} ккал, "
-                      f"Б {fmt_num(e['protein'], 'г')} / Ж {fmt_num(e['fat'], 'г')} / "
-                      f"У {fmt_num(e['carbs'], 'г')}", reply_to=reply_to)
+            self.send(f"✅ {self.label(e)} — {fmt_num(e['kcal'], 'ккал')} ккал "
+                      f"(Б {fmt_num(e['protein'], 'г')} · Ж {fmt_num(e['fat'], 'г')} · "
+                      f"У {fmt_num(e['carbs'], 'г')})\n" + self.day_total_line(e["day"]),
+                      reply_to=reply_to)
         else:
-            # новый вопрос отправим сразу
-            self.send_questions(e["day"])
+            self.ask(e)
+
+    def receipt_answer(self, e, text, kind, file_id, msg_id):
+        """Ответ на «что из чека съел» — это новая запись еды (с покупками в подсказке)."""
+        if str(self.s.state.get("awaiting")) == str(e["id"]):
+            self.s.set_state("awaiting", "")
+        e["answers"] = str(e.get("answers") or "") + f"О: {text or '(' + kind + ')'}\n"
+        e["status"] = RECEIPT
+        self.s.touch(e)
+        if kind == "текст" and text.strip().lower().rstrip(".!") in ("ничего не ел", "ничего", "нет"):
+            self.send("Ок, ничего не записываю 👌", reply_to=msg_id)
+            return
+        self.s.add_entry(day=e["day"], time=self.stamp(), kind=kind,
+                         text=(text + " (из чека)").strip(), status=NEW,
+                         msg_id=msg_id or e["msg_id"], file_id=file_id)
+
+    def day_total_line(self, day) -> str:
+        kcal = sum(to_num(e.get("kcal"), 0) or 0 for e in self.s.entries_of(day)
+                   if e["status"] in COUNTED)
+        norm = next((n["value"] for n in self.s.norms if n["key"] == "kcal"), 0)
+        label = "сегодня" if day == self.today() else fmt_day(day)
+        tail = f" / {fmt_num(norm, 'ккал')}" if norm else ""
+        return f"Итого за {label}: {fmt_num(kcal, 'ккал')}{tail} ккал"
 
     # ---------------- расписание ----------------
     def times(self, day):
@@ -379,11 +510,8 @@ class FoodBot:
         return ask_dt, rep_dt, dl_dt
 
     def day_over(self, day, now):
-        cur = self.s.state.get("current_day") or day
-        if cur > day:
-            return True
         nxt = (d_(day) + timedelta(days=1)).isoformat()
-        return now >= at(nxt, hhmm(DAY_FALLBACK_CLOSE))
+        return now >= at(nxt, self.t("day_start"))
 
     def open_of(self, day):
         return [e for e in self.s.entries_of(day) if e["status"] in OPEN]
@@ -410,8 +538,8 @@ class FoodBot:
                 return
             d["phase"] = ASKING
             self.s.touch_day(d)
+            self.reask(day)
         if d["phase"] == ASKING:
-            self.analyze_pending(day)
             self.send_questions(day)
             open_ = self.open_of(day)
             if not open_ and now >= rep_dt:
@@ -425,7 +553,6 @@ class FoodBot:
         if d["phase"] == REPORTED:
             if not self.day_over(day, now):
                 return
-            self.analyze_pending(day)
             self.send_questions(day)
             open_ = self.open_of(day)
             nxt = (d_(day) + timedelta(days=1)).isoformat()
@@ -443,10 +570,20 @@ class FoodBot:
             d["phase"] = CLOSED
             self.s.touch_day(d)
 
+    def reask(self, day):
+        """Вечером: повторить вопросы, на которые не было ответа днём."""
+        waiting = [e for e in self.s.entries_of(day) if e["status"] == WAITING]
+        if not waiting:
+            return
+        self.send(f"🕘 Вечерние уточнения ({len(waiting)}) — без них отчёт за "
+                  f"{fmt_day(day)} не пришлю:")
+        for e in waiting:
+            self.ask(e)
+
     def mark_approx(self, entries):
         for e in entries:
             if e["status"] in (NEED_ASK, WAITING):
-                e["status"] = APPROX
+                e["status"] = RECEIPT if e.get("source") == RECEIPT_SRC else APPROX
                 self.s.touch(e)
         if str(self.s.state.get("awaiting")) in {str(e["id"]) for e in entries}:
             self.s.set_state("awaiting", "")
@@ -462,6 +599,8 @@ class FoodBot:
             except ValueError:
                 pass
         waiting = [e for e in open_ if e["status"] == WAITING]
+        if not waiting:
+            return
         lines = "\n".join(f"• {self.label(e)}" for e in waiting)
         self.send(f"⏳ Жду уточнения ({len(waiting)}), без них отчёт за {fmt_day(d['day'])} не пришлю:\n"
                   f"{lines}\nОтветь реплаем на вопросы выше. После {self.s.setting('deadline')} "
@@ -522,11 +661,11 @@ class FoodBot:
         return lines
 
     def report_text(self, day, preview=False, correction=None) -> str:
-        statuses = FOOD_DONE + ((NEED_ASK, WAITING, NEW) if preview else ())
+        statuses = COUNTED if preview else FOOD_DONE
         food = [e for e in self.s.entries_of(day) if e["status"] in statuses]
         totals = {k: sum(to_num(e.get(k), 0) or 0 for e in food) for k in NUTRIENTS}
         if correction is not None:
-            head = f"✏️ Поправка к отчёту за {fmt_day(day)}\nДобавлено после отчёта:"
+            head = f"✏️ Поправка к отчёту за {fmt_day(day)}\nДобавлено или исправлено после отчёта:"
             listed = correction
         elif preview:
             head = f"🕐 Промежуточный отчёт за {fmt_day(day)}"
@@ -540,7 +679,7 @@ class FoodBot:
             out.append("")
             out.append("🍽 Съедено:")
         approx = False
-        for e in listed:
+        for e in sorted(listed, key=lambda x: x["time"]):
             mark = ""
             if e["status"] != OK:
                 mark, approx = " ≈", True
