@@ -82,6 +82,12 @@ class FakeAI:
         if "плов" in text:
             return {"transcript": text, "items": [item("Плов", 800, complete=False,
                                                        place="Чайхона №1")]}
+        if "гранатовый сок" in text:
+            return {"transcript": text, "items": [item("Гранатовый сок", 150, place="", amount="250 мл")]}
+        if "вчера был он же" in text:
+            sid = int([l for l in history.split("\n") if "Гранатовый" in l][0].split(" | ")[0])
+            return {"transcript": "бутылка сока Rich", "items": [
+                item("Гранатовый сок", 160, place="Rich", amount="250 мл", updates_id=sid)]}
         if "вчера" in text:
             return {"transcript": text, "items": [item("Чипсы", 500, place="Lay's", yesterday=True)]}
         if "карамель" in text and open_q:
@@ -267,6 +273,24 @@ def test_yesterday_flag():
     e = s.entries[-1]
     assert e["item"] == "Чипсы" and e["day"] == "2026-11-08"
     assert any("Поправка" in m["text"] and "Чипсы" in m["text"] for m in tg.sent)
+
+
+def test_retro_update():
+    s, tg, ai, bot, clock = make()
+    run(bot, clock, T(8, 12, 1), msg(1, T(8, 12), "гранатовый сок"))
+    run(bot, clock, T(8, 21, 31))
+    assert tg.sent[-1]["text"].startswith("📊") and "150" in tg.sent[-1]["text"]
+    run(bot, clock, T(9, 10, 1), msg(2, T(9, 10), "вчера был он же", photo=True))
+    old, new = s.entry(1), s.entries[-1]
+    assert old["status"] == "изменено" and old["kcal"] == ""
+    assert new["day"] == "2026-11-08" and new["place"] == "Rich" and new["time"] == old["time"]
+    assert s.entry(2)["status"] == "ответ", "само фото — не новая еда"
+    reply = [m for m in tg.sent if m["text"].startswith("✏️ Уточнил")][0]["text"]
+    assert "вс, 8 ноября" in reply and "Итого за вс, 8 ноября: 160" in reply, reply
+    corr = [m for m in tg.sent if m["text"].startswith("✏️ Поправка")]
+    assert corr and "Rich" in corr[-1]["text"], "поправка к уже отправленному отчёту"
+    total = sum(x["kcal"] or 0 for x in s.entries_of("2026-11-08") if x["status"] == "ок")
+    assert total == 160, "сок не посчитан дважды"
 
 
 def test_store_helpers():

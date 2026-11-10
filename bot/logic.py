@@ -305,7 +305,7 @@ class FoodBot:
     def history_text(self, days=4):
         since = (d_(self.today()) - timedelta(days=days)).isoformat()
         rows = [e for e in self.s.entries if e["status"] in FOOD_DONE and e["day"] >= since]
-        return "\n".join(f"{e['time']} | {e['item']} | {e['place']} | {e['variant']} | "
+        return "\n".join(f"{e['id']} | {e['time']} | {e['item']} | {e['place']} | {e['variant']} | "
                          f"{e['amount']} | {fmt_num(e['kcal'], 'ккал')}" for e in rows[-60:])
 
     def purchases_text(self, days=14):
@@ -375,15 +375,35 @@ class FoodBot:
                           reply_to=e["msg_id"])
             return
 
-        rows = []
-        for i, it in enumerate(items):
-            tgt = e if i == 0 else self.s.add_entry(
-                day=e["day"], time=e["time"], kind=e["kind"], text=e["text"],
-                msg_id=e["msg_id"], file_id=e.get("file_id", ""), media_group=e.get("media_group", ""))
+        rows, retro, used = [], [], False
+        for it in items:
+            old = self.retro_target(it, e)
+            if old:
+                # сообщение уточняет уже записанную позицию — заменяем её, а не считаем второй раз
+                it["yesterday"] = False
+                tgt = self.replace_entry(old, extra=caption or e["text"])
+                retro.append(tgt)
+            elif not used:
+                tgt, used = e, True
+            else:
+                tgt = self.s.add_entry(
+                    day=e["day"], time=e["time"], kind=e["kind"], text=e["text"],
+                    msg_id=e["msg_id"], file_id=e.get("file_id", ""),
+                    media_group=e.get("media_group", ""))
             self.apply_item(tgt, it)
             rows.append(tgt)
+        if not used:
+            e["status"] = ANSWER  # само сообщение было уточнением, отдельной еды в нём нет
+            self.s.touch(e)
 
-        head = "✏️ Исправил:" if edited else ("🧾 Покупки сохранил, в съеденное записал:" if receipt else "🍽")
+        if retro and len(retro) == len(rows):
+            days = sorted({r["day"] for r in retro})
+            head = "✏️ Уточнил запись за " + ", ".join(
+                "сегодня" if d == self.today() else fmt_day(d) for d in days) + ":"
+            total_day = days[-1]
+        else:
+            head = "✏️ Исправил:" if edited else ("🧾 Покупки сохранил, в съеденное записал:" if receipt else "🍽")
+            total_day = e["day"]
         lines = []
         for r in rows:
             approx = "~" if r["status"] != OK else ""
@@ -391,11 +411,36 @@ class FoodBot:
             lines.append(f"• {self.label(r)} — {approx}{fmt_num(r['kcal'], 'ккал')} ккал "
                          f"(Б {fmt_num(r['protein'], 'г')} · Ж {fmt_num(r['fat'], 'г')} · "
                          f"У {fmt_num(r['carbs'], 'г')}){tail}")
-        self.send(f"{head}\n" + "\n".join(lines) + "\n" + self.day_total_line(e["day"]),
+        self.send(f"{head}\n" + "\n".join(lines) + "\n" + self.day_total_line(total_day),
                   reply_to=e["msg_id"])
         for r in rows:
             if r["status"] == NEED_ASK:
                 self.ask(r)
+
+    def retro_target(self, it, e):
+        """Запись из истории, которую уточняет это сообщение (если ИИ так решил)."""
+        old = self.s.entry(it.get("updates_id")) if it.get("updates_id") else None
+        if not old or old is e or old["status"] not in FOOD_DONE + (NEED_ASK, WAITING):
+            return None
+        return old
+
+    def replace_entry(self, old, extra=""):
+        """Старую строку — в «изменено», вместо неё новая (с тем же днём и временем),
+        чтобы отчёт и поправка учли изменение."""
+        old["status"] = CHANGED
+        for k in NUTRIENTS:
+            old[k] = ""
+        self.s.touch(old)
+        new = self.s.add_entry(day=old["day"], time=old["time"], kind=old["kind"],
+                               text=(old["text"] + (f" | уточнено: {extra}" if extra else "")),
+                               msg_id=old["msg_id"], file_id=old.get("file_id", ""),
+                               answers=old.get("answers", ""))
+        d = self.s.day(old["day"])
+        if d["phase"] == CLOSED:
+            d["phase"] = REPORTED
+            self.s.touch_day(d)
+            self._reopened = True
+        return new
 
     def apply_item(self, e, it):
         e.update({k: it[k] for k in ("item", "place", "variant", "amount", "grams")})
