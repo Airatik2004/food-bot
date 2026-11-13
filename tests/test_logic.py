@@ -107,6 +107,10 @@ class FakeAI:
             return {"transcript": text, "answer_to": first_id, "items": []}
         return {"transcript": text, "items": []}
 
+    def suggest(self, **ctx):
+        self.last_suggest = ctx
+        return "Творог 200 г — ≈170 ккал"
+
     def refine(self, text, it, hist, answer, media, dct, recent="", purchases=""):
         self.calls += 1
         return {"answer_text": answer,
@@ -327,6 +331,23 @@ def test_retro_with_open_question():
     assert s.entry(1)["status"] == "изменено"
     y = [x for x in s.entries if x["day"] == "2026-11-08" and x["status"] == "ок"]
     assert len(y) == 1 and y[0]["place"] == "Rich"
+
+
+def test_eat_suggestion():
+    s, tg, ai, bot, clock = make()
+    run(bot, clock, T(9, 15, 1), msg(1, T(9, 15), "", photo=True))       # чек → покупки
+    run(bot, clock, T(9, 19, 1), msg(2, T(9, 19), "сырный суп"))
+    n_entries = len(s.entries)
+    run(bot, clock, T(9, 22, 30), msg(3, T(9, 22, 30), "чё бы съесть солёное"))
+    assert len(s.entries) == n_entries, "вопрос «че съесть» — не еда"
+    ctx = ai.last_suggest
+    assert ctx["part_of_day"] == "поздний вечер" and ctx["wish"] == "солёное"
+    assert "Калории 2645 ккал" in ctx["left"], ctx["left"]
+    assert "Творог" in ctx["purchases"]
+    eat = [m for m in tg.sent if m["text"].startswith("🍴")]
+    assert eat and eat[-1]["reply_to"] == 3
+    run(bot, clock, T(9, 22, 31), msg(4, T(9, 22, 31), "/eat"))
+    assert ai.last_suggest["wish"] == "нет"
 
 
 def test_store_helpers():

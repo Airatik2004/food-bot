@@ -180,6 +180,23 @@ class Gemini:
                 log.warning("Не разобрал ответ Gemini: %s", ex)
         raise RuntimeError(f"Gemini не ответил: {last_err}")
 
+    def suggest(self, **ctx) -> str:
+        body = {
+            "systemInstruction": {"parts": [{"text": SUGGEST_SYSTEM}]},
+            "contents": [{"role": "user", "parts": [{"text": SUGGEST_TASK.format(**ctx)}]}],
+            "generationConfig": {"temperature": 0.7},
+        }
+        for retry in range(3):
+            r = requests.post(URL.format(model=self.model), json=body, timeout=120,
+                              headers={"x-goog-api-key": self.key})
+            if r.status_code in (429, 500, 503) and retry < 2:
+                time.sleep(5 * (retry + 1))
+                continue
+            break
+        if r.status_code != 200:
+            raise RuntimeError(f"Gemini {r.status_code}: {r.text[:200]}")
+        return response_text(r.json()).strip()
+
     def analyze(self, time_str, text, media, dictionary_text, open_q_text,
                 history_text="", purchases_text="") -> dict:
         text_block = f"Текст: {text}" if text else "Текста нет, см. вложение."
@@ -207,6 +224,34 @@ class Gemini:
         res = self.ask([{"text": prompt}] + media_parts(media))
         res["item"] = normalize_item(res.get("item") or {})
         return res
+
+
+SUGGEST_SYSTEM = """Ты помощник по питанию. Советуешь, что съесть прямо сейчас, чтобы закрыть дневную норму КБЖУ.
+Пиши по-русски, коротко, на «ты», для Telegram: без таблиц и без markdown-заголовков, можно эмодзи.
+Не выдумывай точные цифры для конкретных блюд кафе, если не уверен, — пиши «≈»."""
+
+SUGGEST_TASK = """Сейчас {time} ({part_of_day}). День закрывается в {day_end}.
+Съедено за сегодня: {eaten}
+Осталось до нормы: {left}
+Перебор (лучше не добавлять): {over}
+Не хватает по минералам и клетчатке: {low}
+
+Недавние покупки из чеков (скорее всего, есть дома):
+{purchases}
+
+Где и что он обычно ест (справочник и история):
+{usual}
+
+Пожелание: {wish}
+
+Предложи 3 варианта, что съесть сейчас:
+1) из того, что, вероятно, есть дома (по покупкам), если подходит;
+2) что купить или заказать — лучше из его привычных мест;
+3) что быстро приготовить.
+Для каждого: что именно и сколько (граммы/штуки), ≈ ккал и Б/Ж/У, и одной фразой — почему подходит.
+Учитывай время суток: поздно вечером — без тяжёлого и сладкого, ближе к ночи — белок и полегче.
+Если до нормы осталось мало (меньше ~150 ккал) — так и скажи, и предложи лёгкий перекус или ничего.
+В конце одной строкой — как это закроет остаток."""
 
 
 def media_parts(media):

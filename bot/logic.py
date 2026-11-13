@@ -30,8 +30,12 @@ HELP = """Привет! Я записываю, что ты ешь, и счита
 • Новый день начинается в {start}: всё, что съел ночью, идёт во вчера.
 
 Команды:
+/eat — что съесть сейчас (с учётом остатка КБЖУ и времени). Можно и текстом: «че съесть», «что бы съесть сладкое»
 /report — промежуточный отчёт за сегодня
 /status — что ждёт уточнения"""
+
+EAT_RE = re.compile(r"^\s*(?:/eat\b|(?:ч[её]|что|чо|шо)\s+(?:бы\s+)?(?:мне\s+)?"
+                    r"(?:с[ъь]?есть|поесть|покушать|пожрать)\b)[\s?!.,]*(.*)$", re.I | re.S)
 
 
 def hhmm(s, default="00:00") -> time:
@@ -147,6 +151,9 @@ class FoodBot:
 
     def handle_message(self, m: dict):
         text = (m.get("text") or m.get("caption") or "").strip()
+        eat = EAT_RE.match(text) if not m.get("reply_to_message") else None
+        if eat:
+            return self.suggest(eat.group(1).strip(), reply_to=m["message_id"])
         if text.startswith("/"):
             return self.command(text.split()[0].split("@")[0].lower())
         ts = datetime.fromtimestamp(m["date"], MSK)
@@ -246,6 +253,15 @@ class FoodBot:
         self.apply_answer(e, label, [], reply_to=None)
 
     def command(self, cmd):
+        if cmd == "/start" and hasattr(self.tg, "call"):
+            try:  # меню команд в Telegram
+                self.tg.call("setMyCommands", commands=[
+                    {"command": "eat", "description": "Что съесть сейчас"},
+                    {"command": "report", "description": "Промежуточный отчёт за сегодня"},
+                    {"command": "status", "description": "Что ждёт уточнения"},
+                    {"command": "help", "description": "Как пользоваться"}])
+            except Exception as ex:
+                log.info("setMyCommands: %s", ex)
         if cmd in ("/start", "/help"):
             self.send(HELP.format(ask=self.s.setting("ask_time"), report=self.s.setting("report_time"),
                                   deadline=self.s.setting("deadline"), start=self.s.setting("day_start")))
@@ -263,6 +279,49 @@ class FoodBot:
             self.send(f"Теперь новый день начинается сам в {self.s.setting('day_start')}.")
         else:
             self.send("Не знаю такой команды. /help")
+
+    # ---------------- «че съесть» ----------------
+    def suggest(self, wish="", reply_to=None):
+        self.process_new()  # сначала учесть то, что ещё не разобрано
+        day = self.today()
+        food = [e for e in self.s.entries_of(day) if e["status"] in COUNTED]
+        totals = {k: sum(to_num(e.get(k), 0) or 0 for e in food) for k in NUTRIENTS}
+        left, over, low = [], [], []
+        for n in self.s.norms:
+            key = n["key"]
+            if key not in NUTRIENTS or not n["value"]:
+                continue
+            name, unit = NUTRIENT_NAMES[key]
+            val, norm, typ = totals[key], float(n["value"]), str(n["type"]).lower()
+            if "больше" in typ:
+                if val > norm:
+                    over.append(f"{name} {fmt_num(val, unit)}/{fmt_num(norm, unit)} {unit}")
+            elif key in ("kcal", "protein", "fat", "carbs"):
+                diff = norm - val
+                (left if diff > 0 else over).append(f"{name} {fmt_num(abs(diff), unit)} {unit}")
+            elif val < norm * (1 - self.tol):
+                low.append(f"{name} {fmt_num(val, unit)}/{fmt_num(norm, unit)} {unit}")
+        now = self.now()
+        h = now.hour
+        part = ("ночь" if h < 5 else "утро" if h < 11 else "день" if h < 17
+                else "вечер" if h < 22 else "поздний вечер")
+        usual = sorted({f"{r['place']}: {r['item']} {r['variant']} {r['portion']}".strip()
+                        for r in self.s.dictionary})[-40:]
+        try:
+            text = self.ai.suggest(
+                time=now.strftime("%H:%M"), part_of_day=part, day_end=self.s.setting("day_start"),
+                eaten=", ".join(f"{fmt_num(totals[k], NUTRIENT_NAMES[k][1])} {n}" for k, n in
+                                (("kcal", "ккал"), ("protein", "г белка"), ("fat", "г жиров"),
+                                 ("carbs", "г углеводов"))),
+                left=", ".join(left) or "норма закрыта", over=", ".join(over) or "нет",
+                low=", ".join(low) or "нет", purchases=self.purchases_text(7) or "(нет)",
+                usual="\n".join(usual) or self.history_text() or "(пока мало данных)",
+                wish=wish or "нет")
+        except Exception as ex:
+            log.exception("suggest: %s", ex)
+            self.send("Не получилось придумать, попробуй ещё раз через минуту.", reply_to=reply_to)
+            return
+        self.send(f"🍴 {text}", reply_to=reply_to)
 
     # ---------------- вопросы ----------------
     def entry_by_question(self, msg_id):
