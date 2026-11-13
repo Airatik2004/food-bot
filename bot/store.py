@@ -190,6 +190,7 @@ class SheetStore(Store):
         self.gc = gspread.service_account_from_dict(service_account_info)
         self.sh = self.gc.open_by_key(spreadsheet_id)
         self.row_counts = {}
+        self.col_counts = {}
         self.sheet_ids = {}
 
     def load(self):
@@ -200,8 +201,10 @@ class SheetStore(Store):
         for s in meta.get("sheets", []):
             p = s["properties"]
             self.row_counts[p["title"]] = p.get("gridProperties", {}).get("rowCount", 1000)
+            self.col_counts[p["title"]] = p.get("gridProperties", {}).get("columnCount", 26)
             self.sheet_ids[p["title"]] = p["sheetId"]
         self._ensure_sheets()
+        self._ensure_cols(SHEET_ENTRIES, len(ENTRY_COLS))
 
         ranges = [f"'{SHEET_ENTRIES}'!A:AF", f"'{SHEET_DAYS}'!A:S",
                   f"'{SHEET_DICT}'!A:T", f"'{SHEET_NORMS}'!A:E",
@@ -266,6 +269,14 @@ class SheetStore(Store):
                 self.row_counts[p["title"]] = p["gridProperties"]["rowCount"]
             self.sh.values_batch_update(body={"valueInputOption": "RAW", "data": [
                 {"range": f"'{t}'!A1", "values": [need[t]]} for t in missing]})
+
+    def _ensure_cols(self, title, need):
+        """Добавить колонки, если в листе их меньше, чем нужно новой версии бота."""
+        have = self.col_counts.get(title, 26)
+        if need > have and title in self.sheet_ids:
+            self.sh.batch_update({"requests": [{"appendDimension": {
+                "sheetId": self.sheet_ids[title], "dimension": "COLUMNS", "length": need - have}}]})
+            self.col_counts[title] = need
 
     def _ensure_rows(self, title, need):
         have = self.row_counts.get(title, 1000)
