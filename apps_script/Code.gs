@@ -1,78 +1,85 @@
 /**
  * Приёмщик для бота дневника питания.
- *
- * Раз в минуту забирает новые сообщения у Telegram, складывает их в лист «Входящие»
- * и запускает GitHub Actions — бот разбирает запись и отвечает примерно через минуту.
- * Если приёмщик сломается, бот сам вернётся к старому режиму (по расписанию).
- *
- * Установка: Таблица → Расширения → Apps Script → вставить этот код → заполнить 2 строки ниже →
- * выбрать функцию setup → Выполнить → разрешить доступ. Подробно — в README.
+ * Telegram → этот скрипт → лист «Входящие» → запуск бота на GitHub. Пока бот думает — «печатает…».
+ * Сообщения приходят мгновенно (вебхук), а если вебхук сбоит — скрипт сам переходит на опрос раз в минуту.
  */
 const TELEGRAM_TOKEN = 'ВСТАВЬ_ТОКЕН_БОТА';
 const GITHUB_TOKEN = 'ВСТАВЬ_ТОКЕН_GITHUB';
 const GITHUB_REPO = 'Airatik2004/food-bot';
 const WORKFLOW_FILE = 'bot.yml';
+const WEBAPP_URL = '';      // можно оставить пустым; если setup попросит — вставь сюда URL веб-приложения
+const TYPING_SECONDS = 45;  // сколько максимум показывать «печатает…», пока бот запускается
 
 const INBOX = 'Входящие';
 const STATE = 'Служебное';
+const ALLOWED = JSON.stringify(['message', 'edited_message', 'callback_query']);
 
-/** Один раз запустить вручную: включает приём сообщений. */
+/** Запустить вручную после вставки кода и после каждого нового развертывания. */
 function setup() {
-  // getUpdates не работает, пока у бота стоит webhook
-  tg_('deleteWebhook', { drop_pending_updates: false });
-
-  // начать с того места, где остановился бот на GitHub
   const props = PropertiesService.getScriptProperties();
   if (!props.getProperty('OFFSET')) {
-    const last = Number(stateValue_('last_update_id') || 0);
-    props.setProperty('OFFSET', String(last));
+    props.setProperty('OFFSET', String(Number(stateValue_('last_update_id') || 0)));
   }
-
-  // запуск poll раз в минуту (без дублей)
-  ScriptApp.getProjectTriggers()
-    .filter(t => t.getHandlerFunction() === 'poll')
-    .forEach(t => ScriptApp.deleteTrigger(t));
+  if (!props.getProperty('HOOK_KEY')) {
+    props.setProperty('HOOK_KEY', Utilities.getUuid().replace(/-/g, ''));
+  }
+  ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('poll').timeBased().everyMinutes(1).create();
 
-  // проверка токена GitHub
-  const code = dispatch_();
-  Logger.log(code === 204
-    ? 'Готово! GitHub отвечает. Напиши боту что-нибудь — ответ придёт примерно через минуту.'
-    : 'Telegram подключён, но GitHub ответил кодом ' + code + '. Проверь GITHUB_TOKEN и права Actions: Read and write.');
-  poll();
+  const gh = dispatch_();
+  const ghMsg = gh === 204 ? 'GitHub: ок.' : 'GitHub ответил кодом ' + gh + ' — проверь GITHUB_TOKEN.';
+
+  // сначала забрать то, что накопилось, потом включить вебхук
+  tg_('deleteWebhook', { drop_pending_updates: false });
+  pollUpdates_();
+  const url = WEBAPP_URL || ScriptApp.getService().getUrl() || '';
+  let hookMsg;
+  if (/\/exec$/.test(url)) {
+    const r = tg_('setWebhook', {
+      url: url + '?k=' + props.getProperty('HOOK_KEY'), allowed_updates: ALLOWED, max_connections: 10
+    });
+    hookMsg = r.ok ? 'Вебхук включён: сообщения доходят сразу.'
+      : 'Вебхук не включился (' + r.description + '), работаю опросом раз в минуту.';
+    setState_('webhook', r.ok ? 'on' : 'off');
+  } else {
+    hookMsg = 'Веб-приложение не найдено — работаю опросом раз в минуту. '
+      + 'Чтобы ускорить: Развернуть → Новое развертывание → Веб-приложение, затем снова setup.';
+    setState_('webhook', 'off');
+  }
+  Logger.log('Готово! ' + ghMsg + ' ' + hookMsg);
 }
 
-/** Вызывается триггером раз в минуту. */
+/** Telegram присылает сюда каждое сообщение сразу (вебхук). */
+function doPost(e) {
+  try {
+    const key = PropertiesService.getScriptProperties().getProperty('HOOK_KEY');
+    if (!e || !e.parameter || e.parameter.k !== key || !e.postData) return ok_();
+    const u = JSON.parse(e.postData.contents);
+    const fresh = accept_([u]);
+    if (fresh.length) keepTyping_(fresh);
+  } catch (err) {
+    console.error(err);
+  }
+  return ok_();
+}
+
+/** Раз в минуту: отметиться, проверить вебхук; если он сбоит — забрать сообщения опросом. */
 function poll() {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) return;
   try {
-    const props = PropertiesService.getScriptProperties();
-    const offset = Number(props.getProperty('OFFSET') || 0);
-    const res = tg_('getUpdates', {
-      offset: offset + 1,
-      timeout: 0,
-      allowed_updates: JSON.stringify(['message', 'edited_message', 'callback_query'])
-    });
     setState_('receiver', new Date().toISOString());
-    if (!res.ok || !res.result.length) return;
-
-    const sh = SpreadsheetApp.getActive().getSheetByName(INBOX)
-      || SpreadsheetApp.getActive().insertSheet(INBOX);
-    if (sh.getLastRow() === 0) sh.appendRow(['update_id', 'Получено', 'JSON']);
-
-    let last = offset;
-    const rows = [];
-    res.result.forEach(u => {
-      rows.push([u.update_id, new Date(), JSON.stringify(u)]);
-      last = Math.max(last, u.update_id);
-      if (u.callback_query) {  // убрать «часики» на кнопке сразу
-        tg_('answerCallbackQuery', { callback_query_id: u.callback_query.id, text: 'Принял, считаю…' });
-      }
-    });
-    sh.getRange(sh.getLastRow() + 1, 1, rows.length, 3).setValues(rows);
-    props.setProperty('OFFSET', String(last));
-    dispatch_();
+    const info = (tg_('getWebhookInfo', {}).result) || {};
+    if (info.url) {
+      const now = Date.now() / 1000;
+      const stuck = info.pending_update_count > 0 && info.last_error_date && now - info.last_error_date < 300;
+      if (!stuck) return;
+      // вебхук сбоит (например, 302 от Google) — выключаем и работаем опросом
+      tg_('deleteWebhook', { drop_pending_updates: false });
+      setState_('webhook', 'off: ' + (info.last_error_message || 'ошибка'));
+    }
+    const fresh = pollUpdates_();
+    if (fresh.length) keepTyping_(fresh);
   } finally {
     lock.releaseLock();
   }
@@ -81,7 +88,65 @@ function poll() {
 /** Отключить приёмщик (бот вернётся к работе по расписанию). */
 function stop() {
   ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
+  tg_('deleteWebhook', { drop_pending_updates: false });
   setState_('receiver', '');
+  setState_('webhook', 'off');
+}
+
+function pollUpdates_() {
+  const props = PropertiesService.getScriptProperties();
+  const offset = Number(props.getProperty('OFFSET') || 0);
+  const res = tg_('getUpdates', { offset: offset + 1, timeout: 0, allowed_updates: ALLOWED });
+  if (!res.ok || !res.result.length) return [];
+  const fresh = accept_(res.result);
+  const last = res.result.reduce((m, u) => Math.max(m, u.update_id), offset);
+  props.setProperty('OFFSET', String(last));
+  return fresh;
+}
+
+/** Сохранить новые апдейты, снять «часики» с кнопок, запустить бота. Возвращает новые. */
+function accept_(updates) {
+  const cache = CacheService.getScriptCache();
+  const fresh = updates.filter(u => {
+    const k = 'u' + u.update_id;
+    if (cache.get(k)) return false;   // Telegram мог прислать повтор
+    cache.put(k, '1', 21600);
+    return true;
+  });
+  if (!fresh.length) return [];
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(INBOX) || ss.insertSheet(INBOX);
+  if (sh.getLastRow() === 0) sh.appendRow(['update_id', 'Получено', 'JSON']);
+  fresh.forEach(u => {
+    sh.appendRow([u.update_id, new Date(), JSON.stringify(u)]);
+    if (u.callback_query) {
+      tg_('answerCallbackQuery', { callback_query_id: u.callback_query.id, text: 'Принял, считаю…' });
+    }
+  });
+  SpreadsheetApp.flush();
+  dispatch_();
+  return fresh;
+}
+
+/** «Печатает…», пока бот на GitHub не обработает сообщения (или не выйдет время). */
+function keepTyping_(updates) {
+  const chats = {};
+  let maxId = 0;
+  updates.forEach(u => {
+    const m = u.message || u.edited_message || (u.callback_query && u.callback_query.message);
+    if (m && m.chat) chats[m.chat.id] = true;
+    maxId = Math.max(maxId, u.update_id);
+  });
+  const end = Date.now() + TYPING_SECONDS * 1000;
+  while (Date.now() < end) {
+    if (Number(stateValue_('last_update_id') || 0) >= maxId) return;
+    Object.keys(chats).forEach(c => tg_('sendChatAction', { chat_id: c, action: 'typing' }));
+    Utilities.sleep(4000);
+  }
+}
+
+function ok_() {
+  return HtmlService.createHtmlOutput('ok');
 }
 
 function dispatch_() {

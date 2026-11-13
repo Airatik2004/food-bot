@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -39,6 +40,27 @@ def service_account():
              "скачанного .json-файла целиком, от первой { до последней }. "
              f"Сейчас там {len(raw)} символов, начинается не с '{{'." if not raw.lstrip().startswith("{")
              else "Секрет GOOGLE_SERVICE_ACCOUNT_JSON обрезан или испорчен — вставь файл целиком ещё раз.")
+
+
+class Typing:
+    """Пока бот думает, в Telegram висит «печатает…» (Telegram гасит его через 5 с — обновляем)."""
+
+    def __init__(self, tg: Telegram, chat_id, active=True):
+        self.tg, self.chat_id, self.active = tg, chat_id, bool(active and chat_id)
+        self.stop = threading.Event()
+
+    def _loop(self):
+        while not self.stop.is_set():
+            self.tg.typing(self.chat_id)
+            self.stop.wait(4)
+
+    def __enter__(self):
+        if self.active:
+            threading.Thread(target=self._loop, daemon=True).start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop.set()
 
 
 def handle_all(bot: FoodBot, updates) -> int:
@@ -88,14 +110,20 @@ def main():
     if receiver_alive(store.state.get("receiver")):
         # Режим «приёмщика»: Apps Script раз в минуту забирает сообщения у Telegram,
         # складывает их в лист «Входящие» и запускает этот workflow.
-        handle_all(bot, [x["update"] for x in store.inbox])
-        step(bot, store)
+        last = int(to_num(store.state.get("last_update_id"), 0))
+        fresh = [x["update"] for x in store.inbox if x["update_id"] > last]
+        with Typing(tg, bot.chat_id, active=fresh):
+            handle_all(bot, fresh)
+            step(bot, store)
         log.info("Готово (приёмщик)")
         return
 
     # Режим без приёмщика: забираем сообщения у Telegram сами.
-    poll(bot, tg)
-    step(bot, store)
+    offset = int(to_num(store.state.get("last_update_id"), 0)) + 1
+    updates = tg.get_updates(offset)
+    with Typing(tg, bot.chat_id, active=updates):
+        handle_all(bot, updates)
+        step(bot, store)
 
     # «Живое окно»: если бот только что задал вопросы или ты что-то ответил,
     # он ещё несколько минут слушает ответы в реальном времени.
@@ -107,8 +135,11 @@ def main():
         left = int(min(50, deadline - time.time()))
         if left <= 0:
             break
-        if poll(bot, tg, timeout=left):
-            step(bot, store)
+        updates = tg.get_updates(int(to_num(store.state.get("last_update_id"), 0)) + 1, timeout=left)
+        if updates:
+            with Typing(tg, bot.chat_id):
+                handle_all(bot, updates)
+                step(bot, store)
     store.flush()
     log.info("Готово")
 

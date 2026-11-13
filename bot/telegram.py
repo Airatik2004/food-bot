@@ -46,6 +46,12 @@ class Telegram:
             rp = None
         return res
 
+    def typing(self, chat_id):
+        try:
+            self.call("sendChatAction", http_timeout=10, chat_id=chat_id, action="typing")
+        except Exception as ex:
+            log.info("sendChatAction: %s", ex)
+
     def answer_callback(self, cq_id, text=None):
         try:
             self.call("answerCallbackQuery", callback_query_id=cq_id, text=text)

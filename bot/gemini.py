@@ -155,23 +155,20 @@ class Gemini:
                           headers={"x-goog-api-key": self.key})
         return r
 
-    def ask(self, parts) -> dict:
-        """Пробует: поиск + JSON → поиск без JSON-режима → без поиска."""
-        attempts = []
-        if self.web_search:
-            attempts += [(True, True), (True, False)]
-        attempts += [(False, True)]
+    def _call(self, parts, use_search):
+        """Один запрос; при ошибке режима JSON вместе с поиском — повтор без JSON-режима."""
+        modes = [(use_search, True)] + ([(True, False)] if use_search else [])
         last_err = None
-        for use_search, json_mode in attempts:
+        for search, json_mode in modes:
             for retry in range(3):
-                r = self._post(parts, use_search, json_mode)
+                r = self._post(parts, search, json_mode)
                 if r.status_code in (429, 500, 503) and retry < 2:
-                    time.sleep(5 * (retry + 1))
+                    time.sleep(3 * (retry + 1))
                     continue
                 break
             if r.status_code != 200:
                 last_err = f"{r.status_code}: {r.text[:300]}"
-                log.warning("Gemini (search=%s json=%s) → %s", use_search, json_mode, last_err)
+                log.warning("Gemini (search=%s json=%s) → %s", search, json_mode, last_err)
                 continue
             try:
                 return parse_json(response_text(r.json()))
@@ -179,6 +176,19 @@ class Gemini:
                 last_err = str(ex)
                 log.warning("Не разобрал ответ Gemini: %s", ex)
         raise RuntimeError(f"Gemini не ответил: {last_err}")
+
+    def ask(self, parts) -> dict:
+        """Сначала быстро, без поиска. Если ИИ просит поиск (сетевое блюдо, бренд) — второй заход с поиском."""
+        note = ("\n\nПоиск в интернете в этом запросе ВЫКЛЮЧЕН. Если для точного КБЖУ нужно найти "
+                "опубликованные данные сети/бренда, а их нет в справочнике и покупках, — всё равно заполни "
+                "лучшую оценку и добавь в корень JSON \"need_search\": true. Иначе \"need_search\": false.")
+        res = self._call([{"text": parts[0]["text"] + note}] + parts[1:], use_search=False)
+        if self.web_search and res.get("need_search"):
+            try:
+                return self._call(parts, use_search=True)
+            except RuntimeError as ex:
+                log.warning("Поиск не удался, оставляю оценку: %s", ex)
+        return res
 
     def suggest(self, **ctx) -> str:
         body = {
