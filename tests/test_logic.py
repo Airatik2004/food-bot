@@ -168,57 +168,46 @@ def test_full_day():
     run(bot, clock, T(8, 9, 1), msg(1, T(8, 9), "сырный суп из вкусвилла"))
     r = tg.sent[-1]
     assert r["text"].startswith("🍽") and "300 ккал" in r["text"] and r["reply_to"] == 1
-    assert "Итого за сегодня: 300 / 2945 ккал" in r["text"], r["text"]
+    assert "📊 Сегодня:" in r["text"] and "Калории: 300 / 2945 ккал" in r["text"], r["text"]
+    assert "Белки" in r["text"] and "Натрий" in r["text"] and "Клетчатка" in r["text"]
 
     run(bot, clock, T(8, 13, 1), msg(2, T(8, 13), "раф из серфа"))
     summary, q = tg.sent[-2], tg.sent[-1]
     assert "~350" in summary["text"] and "уточню ниже" in summary["text"]
-    assert q["text"].startswith("❓") and q["reply_to"] == 2
-    assert q["buttons"][0][0][0] == "Классический 400 мл"
+    assert "≈ часть позиций примерные" in summary["text"]
+    assert q["text"].startswith("❓") and q["buttons"][0][0][0] == "Классический 400 мл"
     raf = s.entry(2)
-    assert raf["status"] == "ждёт ответа" and raf["options"]
 
+    # вечером бот ничего сам не пишет
     n = len(tg.sent)
-    run(bot, clock, T(8, 15))
-    assert len(tg.sent) == n, "днём без новых сообщений бот молчит"
+    for h in (15, 21, 22, 23):
+        run(bot, clock, T(8, h, 1))
+    run(bot, clock, T(9, 1, 1))
+    assert len(tg.sent) == n, "никаких вечерних сообщений"
 
-    # 21:01 — повтор неотвеченных вопросов
-    run(bot, clock, T(8, 21, 1))
-    assert tg.sent[-2]["text"].startswith("🕘") and tg.sent[-1]["text"].startswith("❓")
-    assert tg.sent[-1]["buttons"][0][0][0] == "Классический 400 мл", "варианты берутся из таблицы"
-    q2 = tg.sent[-1]
+    # ночной перекус → тот же день
+    run(bot, clock, T(9, 0, 31), msg(3, T(9, 0, 30), "сырники"))
+    assert s.entry(3)["day"] == "2026-11-08"
+    assert "Калории: 1100 / 2945" in tg.sent[-1]["text"], tg.sent[-1]["text"]
 
-    run(bot, clock, T(8, 21, 31))
-    assert "⏳" in tg.sent[-1]["text"]
+    # 05:01 — итог за вчера, неотвеченный раф — «примерно»
+    run(bot, clock, T(9, 5, 1))
+    sm = tg.sent[-1]["text"]
+    assert sm.startswith("🌅 Итог за вс, 8 ноября") and "Сырники" in sm and "≈" in sm, sm
+    assert raf["status"] == "примерно" and s.day("2026-11-08")["phase"] == "закрыт"
     n = len(tg.sent)
-    run(bot, clock, T(8, 21, 36))
-    assert len(tg.sent) == n, "не спамит напоминаниями"
+    run(bot, clock, T(9, 9, 1))
+    assert len(tg.sent) == n, "итог приходит один раз"
 
-    # кнопка на повторном вопросе
+    # на вопрос можно ответить и после закрытия дня
     bot.handle_update({"callback_query": {
         "id": "c1", "data": f"o:{raf['id']}:1",
-        "message": {"message_id": q2["id"], "chat": {"id": 42}, "text": q2["text"],
+        "message": {"message_id": q["id"], "chat": {"id": 42}, "text": q["text"],
                     "reply_markup": {"inline_keyboard": [
                         [{"text": "Классический 400 мл", "callback_data": f"o:{raf['id']}:0"}],
                         [{"text": "Солёная карамель 400 мл", "callback_data": f"o:{raf['id']}:1"}]]}}}})
     assert raf["status"] == "ок" and raf["kcal"] == 380
-    assert tg.sent[-1]["text"].startswith("✅") and "680" in tg.sent[-1]["text"]
-
-    run(bot, clock, T(8, 21, 40))
-    rep = tg.sent[-1]["text"]
-    assert rep.startswith("📊 Отчёт за вс, 8 ноября") and "680" in rep, rep
-
-    # ночной перекус → тот же день, поправка после 05:00
-    run(bot, clock, T(9, 0, 31), msg(3, T(9, 0, 30), "сырники"))
-    assert s.entry(3)["day"] == "2026-11-08"
-    assert "Итого за сегодня: 1130" in tg.sent[-1]["text"], "до 05:00 это ещё тот же день"
-    n = len(tg.sent)
-    run(bot, clock, T(9, 1, 1))
-    assert len(tg.sent) == n
-    run(bot, clock, T(9, 8, 1))
-    corr = tg.sent[-1]["text"]
-    assert corr.startswith("✏️ Поправка") and "Сырники" in corr and "1130" in corr, corr
-    assert s.day("2026-11-08")["phase"] == "закрыт"
+    assert "За вс, 8 ноября" in tg.sent[-1]["text"] and "Калории: 1130" in tg.sent[-1]["text"]
 
 
 def test_history_and_answer_by_text():
@@ -250,7 +239,7 @@ def test_receipt():
     assert e["status"] == "чек"
     food = [x for x in s.entries if x["status"] == "ок"]
     assert len(food) == 1 and food[0]["item"].startswith("Творог")
-    assert "Итого за сегодня: 170" in tg.sent[-1]["text"]
+    assert "Калории: 170 / 2945" in tg.sent[-1]["text"]
 
     # чек с подписью о съеденном
     run(bot, clock, T(9, 16, 1), msg(3, T(9, 16), "хлеб 4 куска", photo=True))
@@ -277,34 +266,31 @@ def test_edit():
     old, new = s.entry(1), s.entries[-1]
     assert old["status"] == "изменено" and old["kcal"] == ""
     assert new["item"] == "Овсянка" and new["msg_id"] == 1 and new["time"] == old["time"]
-    assert tg.sent[-1]["text"].startswith("✏️ Исправил") and "Итого за сегодня: 250" in tg.sent[-1]["text"]
+    assert tg.sent[-1]["text"].startswith("✏️ Исправил") and "Калории: 250 / 2945" in tg.sent[-1]["text"]
 
 
 def test_yesterday_flag():
     s, tg, ai, bot, clock = make()
     run(bot, clock, T(8, 13, 1), msg(1, T(8, 13), "сырный суп"))
-    run(bot, clock, T(8, 21, 31))
-    assert tg.sent[-1]["text"].startswith("📊")
+    run(bot, clock, T(9, 5, 1))
+    assert tg.sent[-1]["text"].startswith("🌅")
     run(bot, clock, T(9, 10, 1), msg(2, T(9, 10), "вчера ночью съел чипсы"))
     e = s.entries[-1]
     assert e["item"] == "Чипсы" and e["day"] == "2026-11-08"
-    assert any("Поправка" in m["text"] and "Чипсы" in m["text"] for m in tg.sent)
+    assert "За вс, 8 ноября" in tg.sent[-1]["text"] and "Калории: 800" in tg.sent[-1]["text"]
 
 
 def test_retro_update():
     s, tg, ai, bot, clock = make()
     run(bot, clock, T(8, 12, 1), msg(1, T(8, 12), "гранатовый сок"))
-    run(bot, clock, T(8, 21, 31))
-    assert tg.sent[-1]["text"].startswith("📊") and "150" in tg.sent[-1]["text"]
+    run(bot, clock, T(9, 5, 1))
     run(bot, clock, T(9, 10, 1), msg(2, T(9, 10), "вчера был он же", photo=True))
     old, new = s.entry(1), s.entries[-1]
     assert old["status"] == "изменено" and old["kcal"] == ""
     assert new["day"] == "2026-11-08" and new["place"] == "Rich" and new["time"] == old["time"]
     assert s.entry(2)["status"] == "ответ", "само фото — не новая еда"
-    reply = [m for m in tg.sent if m["text"].startswith("✏️ Уточнил")][0]["text"]
-    assert "вс, 8 ноября" in reply and "Итого за вс, 8 ноября: 160" in reply, reply
-    corr = [m for m in tg.sent if m["text"].startswith("✏️ Поправка")]
-    assert corr and "Rich" in corr[-1]["text"], "поправка к уже отправленному отчёту"
+    reply = tg.sent[-1]["text"]
+    assert reply.startswith("✏️ Уточнил запись за вс, 8 ноября") and "Калории: 160" in reply, reply
     total = sum(x["kcal"] or 0 for x in s.entries_of("2026-11-08") if x["status"] == "ок")
     assert total == 160, "сок не посчитан дважды"
 

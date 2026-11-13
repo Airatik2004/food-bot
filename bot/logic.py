@@ -6,9 +6,8 @@ import re
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from .schema import (ANSWER, APPROX, ASKING, CHANGED, CLOSED, COLLECT, FOOD_DONE, NEED_ASK,
-                     NEW, NOT_FOOD, NUTRIENT_NAMES, NUTRIENTS, OK, OPEN, RECEIPT, REPORTED,
-                     WAITING)
+from .schema import (ANSWER, APPROX, CHANGED, CLOSED, FOOD_DONE, NEED_ASK, NEW, NOT_FOOD,
+                     NUTRIENT_NAMES, NUTRIENTS, OK, OPEN, RECEIPT, WAITING)
 from .store import Store, to_num
 
 log = logging.getLogger("logic")
@@ -23,15 +22,13 @@ RECEIPT_SRC = "чек"
 HELP = """Привет! Я записываю, что ты ешь, и считаю КБЖУ.
 
 • Пиши или говори голосом: «сырный суп из ВкусВилла», «раф из Surf 400 мл». Можно фото блюда или этикетки.
-• На каждую запись отвечаю разбором и калориями. Если чего-то не хватает (граммы, место, вкус), сразу спрошу — отвечай кнопкой или реплаем. Можно «как вчера».
+• На каждую запись отвечаю разбором и полной картиной дня: калории, БЖУ, сахар, клетчатка, минералы против нормы. Если чего-то не хватает (граммы, место, вкус), сразу спрошу — отвечай кнопкой или реплаем. Можно «как вчера».
 • Чек: пришли фото — сохраню покупки и спрошу, что из этого ты съел. В подписи можно сразу написать: «съел хлеб, 4 куска».
 • Ошибся — просто отредактируй сообщение, я пересчитаю.
-• В {ask} доспрошу неотвеченное, отчёт — в {report}, когда всё уточнено. Напоминаю до {deadline}, потом считаю «примерно».
-• Новый день начинается в {start}: всё, что съел ночью, идёт во вчера.
+• Новый день начинается в {start}: всё, что съел ночью, идёт во вчера. В {start} пришлю итог за прошедший день; неотвеченное посчитаю «примерно» (ответить можно и потом).
 
 Команды:
 /eat — что съесть сейчас (с учётом остатка КБЖУ и времени). Можно и текстом: «че съесть», «что бы съесть сладкое»
-/report — промежуточный отчёт за сегодня
 /status — что ждёт уточнения"""
 
 EAT_RE = re.compile(r"^\s*(?:/eat\b|(?:ч[её]|что|чо|шо)\s+(?:бы\s+)?(?:мне\s+)?"
@@ -87,7 +84,6 @@ class FoodBot:
         self.ai = gemini
         self.chat_id = str(chat_id) if chat_id else ""
         self.now_fn = now_fn or (lambda: datetime.now(MSK))
-        self._reopened = False
         self.edited_ids: set = set()
         self.activity = False       # пользователь что-то прислал в этом запуске
         self.asked = False          # бот задал вопросы в этом запуске
@@ -222,17 +218,13 @@ class FoodBot:
                                file_id=first.get("file_id") or file_id,
                                media_group=first.get("media_group", ""))
         self.edited_ids.add(new["id"])
-        d = self.s.day(first["day"])
-        if d["phase"] == CLOSED:
-            d["phase"] = REPORTED
-            self.s.touch_day(d)
 
     def handle_callback(self, cq: dict):
         data = cq.get("data", "")
         msg = cq.get("message", {})
         parts = data.split(":")
         e = self.s.entry(parts[1]) if len(parts) > 1 else None
-        if not e or e["status"] != WAITING:
+        if not e or e["status"] not in (WAITING, APPROX):
             self.tg.answer_callback(cq["id"], "Уже учтено")
             return
         if parts[0] == "x":
@@ -257,17 +249,14 @@ class FoodBot:
             try:  # меню команд в Telegram
                 self.tg.call("setMyCommands", commands=[
                     {"command": "eat", "description": "Что съесть сейчас"},
-                    {"command": "report", "description": "Промежуточный отчёт за сегодня"},
                     {"command": "status", "description": "Что ждёт уточнения"},
                     {"command": "help", "description": "Как пользоваться"}])
             except Exception as ex:
                 log.info("setMyCommands: %s", ex)
         if cmd in ("/start", "/help"):
-            self.send(HELP.format(ask=self.s.setting("ask_time"), report=self.s.setting("report_time"),
-                                  deadline=self.s.setting("deadline"), start=self.s.setting("day_start")))
+            self.send(HELP.format(start=self.s.setting("day_start")))
         elif cmd == "/report":
-            self.process_new()
-            self.send(self.report_text(self.today(), preview=True))
+            self.send(self.day_block(self.today()))
         elif cmd == "/status":
             open_ = [e for e in self.s.entries if e["status"] in OPEN]
             if not open_:
@@ -327,7 +316,7 @@ class FoodBot:
     def entry_by_question(self, msg_id):
         for e in self.s.entries:
             ids = [x for x in str(e.get("question_msg_id") or "").split(",") if x]
-            if str(msg_id) in ids and e["status"] == WAITING:
+            if str(msg_id) in ids and e["status"] in (WAITING, APPROX):
                 return e
         return None
 
@@ -480,7 +469,7 @@ class FoodBot:
             lines.append(f"• {self.label(r)} — {approx}{fmt_num(r['kcal'], 'ккал')} ккал "
                          f"(Б {fmt_num(r['protein'], 'г')} · Ж {fmt_num(r['fat'], 'г')} · "
                          f"У {fmt_num(r['carbs'], 'г')}){tail}")
-        self.send(f"{head}\n" + "\n".join(lines) + "\n" + self.day_total_line(total_day),
+        self.send(f"{head}\n" + "\n".join(lines) + "\n\n" + self.day_block(total_day),
                   reply_to=e["msg_id"])
         for r in rows:
             if r["status"] == NEED_ASK:
@@ -504,11 +493,7 @@ class FoodBot:
                                text=(old["text"] + (f" | уточнено: {extra}" if extra else "")),
                                msg_id=old["msg_id"], file_id=old.get("file_id", ""),
                                answers=old.get("answers", ""))
-        d = self.s.day(old["day"])
-        if d["phase"] == CLOSED:
-            d["phase"] = REPORTED
-            self.s.touch_day(d)
-            self._reopened = True
+        self.s.day(old["day"])
         return new
 
     def apply_item(self, e, it):
@@ -536,11 +521,7 @@ class FoodBot:
         if it.get("yesterday"):
             prev = (d_(e["day"]) - timedelta(days=1)).isoformat()
             e["day"] = prev
-            d = self.s.day(prev)
-            if d["phase"] == CLOSED:
-                d["phase"] = REPORTED
-                self.s.touch_day(d)
-                self._reopened = True
+            self.s.day(prev)
         self.s.touch(e)
 
     def dict_row(self, row_id):
@@ -584,7 +565,7 @@ class FoodBot:
         if e["status"] == OK:
             self.send(f"✅ {self.label(e)} — {fmt_num(e['kcal'], 'ккал')} ккал "
                       f"(Б {fmt_num(e['protein'], 'г')} · Ж {fmt_num(e['fat'], 'г')} · "
-                      f"У {fmt_num(e['carbs'], 'г')})\n" + self.day_total_line(e["day"]),
+                      f"У {fmt_num(e['carbs'], 'г')})\n\n" + self.day_block(e["day"]),
                       reply_to=reply_to)
         else:
             self.ask(e)
@@ -603,26 +584,18 @@ class FoodBot:
                          text=(text + " (из чека)").strip(), status=NEW,
                          msg_id=msg_id or e["msg_id"], file_id=file_id)
 
-    def day_total_line(self, day) -> str:
-        kcal = sum(to_num(e.get("kcal"), 0) or 0 for e in self.s.entries_of(day)
-                   if e["status"] in COUNTED)
-        norm = next((n["value"] for n in self.s.norms if n["key"] == "kcal"), 0)
-        label = "сегодня" if day == self.today() else fmt_day(day)
-        tail = f" / {fmt_num(norm, 'ккал')}" if norm else ""
-        return f"Итого за {label}: {fmt_num(kcal, 'ккал')}{tail} ккал"
+    def day_block(self, day) -> str:
+        """Полная картина дня — добавляется к каждому ответу."""
+        food = [e for e in self.s.entries_of(day) if e["status"] in COUNTED]
+        totals = {k: sum(to_num(e.get(k), 0) or 0 for e in food) for k in NUTRIENTS}
+        label = "Сегодня" if day == self.today() else f"За {fmt_day(day)}"
+        live = not self.day_over(day, self.now())
+        out = [f"📊 {label}:"] + self.norms_block(totals, live=live)
+        if any(e["status"] != OK for e in food):
+            out.append("≈ часть позиций примерные")
+        return "\n".join(out)
 
     # ---------------- расписание ----------------
-    def times(self, day):
-        ask, rep, dl = self.t("ask_time"), self.t("report_time"), self.t("deadline")
-        ask_dt = at(day, ask)
-        rep_dt = at(day, rep)
-        if rep_dt < ask_dt:
-            rep_dt += timedelta(days=1)
-        dl_dt = at(day, dl)
-        if dl_dt <= ask_dt:
-            dl_dt += timedelta(days=1)
-        return ask_dt, rep_dt, dl_dt
-
     def day_over(self, day, now):
         nxt = (d_(day) + timedelta(days=1)).isoformat()
         return now >= at(nxt, self.t("day_start"))
@@ -631,112 +604,34 @@ class FoodBot:
         return [e for e in self.s.entries_of(day) if e["status"] in OPEN]
 
     def tick(self):
+        """Единственное плановое действие: в 05:00 закрыть прошедший день и прислать итог."""
         now = self.now()
-        for _ in range(2):  # второй проход — если запись «вчера» переоткрыла закрытый день
-            self._reopened = False
-            for d in sorted(self.s.days, key=lambda x: x["day"]):
-                if d["phase"] == CLOSED or not d["day"]:
-                    continue
-                try:
-                    self.tick_day(d, now)
-                except Exception as ex:
-                    log.exception("Ошибка в дне %s: %s", d["day"], ex)
-            if not self._reopened:
-                break
+        yesterday = (d_(self.today()) - timedelta(days=1)).isoformat()
+        for d in sorted(self.s.days, key=lambda x: x["day"]):
+            if d["phase"] == CLOSED or not d["day"] or not self.day_over(d["day"], now):
+                continue
+            try:
+                self.close_day(d, now, send=d["day"] >= yesterday)
+            except Exception as ex:
+                log.exception("Ошибка в дне %s: %s", d["day"], ex)
 
-    def tick_day(self, d, now):
+    def close_day(self, d, now, send=True):
         day = d["day"]
-        ask_dt, rep_dt, dl_dt = self.times(day)
-        if d["phase"] == COLLECT:
-            if now < ask_dt:
-                return
-            d["phase"] = ASKING
-            self.s.touch_day(d)
-            self.reask(day)
-        if d["phase"] == ASKING:
-            self.send_questions(day)
-            open_ = self.open_of(day)
-            if not open_ and now >= rep_dt:
-                self.finish_report(d, now)
-            elif open_ and now >= dl_dt:
-                self.mark_approx(open_)
-                self.finish_report(d, now)
-            elif open_ and now >= rep_dt:
-                self.maybe_remind(d, now, open_)
-            return
-        if d["phase"] == REPORTED:
-            if not self.day_over(day, now):
-                return
-            self.send_questions(day)
-            open_ = self.open_of(day)
-            nxt = (d_(day) + timedelta(days=1)).isoformat()
-            corr_deadline = at(nxt, self.t("ask_time"))
-            if open_ and now < corr_deadline:
-                return
-            if open_:
-                self.mark_approx(open_)
-            last_id = self.report_last_id(d)
-            late = [e for e in self.s.entries_of(day)
-                    if e["status"] in FOOD_DONE and to_num(e["id"], 0) > last_id]
-            if late:
-                self.send(self.report_text(day, correction=late))
-                d["correction_at"] = self.stamp(now)
-            d["phase"] = CLOSED
-            self.s.touch_day(d)
-
-    def reask(self, day):
-        """Вечером: повторить вопросы, на которые не было ответа днём."""
-        waiting = [e for e in self.s.entries_of(day) if e["status"] == WAITING]
-        if not waiting:
-            return
-        self.send(f"🕘 Вечерние уточнения ({len(waiting)}) — без них отчёт за "
-                  f"{fmt_day(day)} не пришлю:")
-        for e in waiting:
-            self.ask(e)
+        self.mark_approx(self.open_of(day))
+        if send and any(e["status"] in FOOD_DONE for e in self.s.entries_of(day)):
+            self.send(self.summary_text(day))
+        d["phase"] = CLOSED
+        d["report_at"] = self.stamp(now)
+        self.s.touch_day(d)
 
     def mark_approx(self, entries):
+        """Неотвеченные вопросы — в «примерно» (ответить на них можно и позже)."""
         for e in entries:
             if e["status"] in (NEED_ASK, WAITING):
                 e["status"] = RECEIPT if e.get("source") == RECEIPT_SRC else APPROX
                 self.s.touch(e)
         if str(self.s.state.get("awaiting")) in {str(e["id"]) for e in entries}:
             self.s.set_state("awaiting", "")
-
-    def maybe_remind(self, d, now, open_):
-        every = float(to_num(self.s.setting("reminder_every"), 30))
-        last = d.get("last_reminder")
-        if last:
-            try:
-                last_dt = datetime.strptime(str(last), "%Y-%m-%d %H:%M").replace(tzinfo=MSK)
-                if (now - last_dt).total_seconds() < (every - 3) * 60:
-                    return
-            except ValueError:
-                pass
-        waiting = [e for e in open_ if e["status"] == WAITING]
-        if not waiting:
-            return
-        lines = "\n".join(f"• {self.label(e)}" for e in waiting)
-        self.send(f"⏳ Жду уточнения ({len(waiting)}), без них отчёт за {fmt_day(d['day'])} не пришлю:\n"
-                  f"{lines}\nОтветь реплаем на вопросы выше. После {self.s.setting('deadline')} "
-                  f"посчитаю примерно.")
-        d["last_reminder"] = self.stamp(now)
-        self.s.touch_day(d)
-
-    def report_last_id(self, d) -> int:
-        m = re.search(r"№(\d+)", str(d.get("report_at") or ""))
-        return int(m.group(1)) if m else 0
-
-    def finish_report(self, d, now):
-        day = d["day"]
-        food = [e for e in self.s.entries_of(day) if e["status"] in FOOD_DONE]
-        if food:
-            self.send(self.report_text(day))
-        else:
-            self.send(f"За {fmt_day(day)} нет записей о еде.")
-        last_id = max([to_num(e["id"], 0) for e in self.s.entries] + [0])
-        d["phase"] = REPORTED
-        d["report_at"] = f"{self.stamp(now)}, записи до №{last_id}"
-        self.s.touch_day(d)
 
     # ---------------- отчёт ----------------
     def label(self, e) -> str:
@@ -749,7 +644,8 @@ class FoodBot:
             s += f", {e['amount']}"
         return s
 
-    def norms_block(self, totals) -> list[str]:
+    def norms_block(self, totals, live=False) -> list[str]:
+        """live=True — день ещё идёт: вместо «-90%» показываем, сколько осталось."""
         lines = []
         tol = self.tol
         for n in self.s.norms or []:
@@ -769,41 +665,26 @@ class FoodBot:
                 ok, sign = val >= norm * (1 - tol), "≥"
             else:
                 ok, sign = abs(val / norm - 1) <= tol, ""
-            icon = "✅" if ok else ("🔺" if pct > 0 else "🔻")
-            tail = "" if ok else f" ({pct:+.0f}%)"
+            if live and not ok and pct < 0:
+                icon, tail = "⏳", f" (ещё {fmt_num(norm - val, unit)})"
+            else:
+                icon = "✅" if ok else ("🔺" if pct > 0 else "🔻")
+                tail = "" if ok else f" ({pct:+.0f}%)"
             lines.append(f"{icon} {name}: {fmt_num(val, unit)} / {sign}{fmt_num(norm, unit)} {unit}{tail}")
         return lines
 
-    def report_text(self, day, preview=False, correction=None) -> str:
-        statuses = COUNTED if preview else FOOD_DONE
-        food = [e for e in self.s.entries_of(day) if e["status"] in statuses]
+    def summary_text(self, day) -> str:
+        food = sorted([e for e in self.s.entries_of(day) if e["status"] in FOOD_DONE],
+                      key=lambda x: x["time"])
         totals = {k: sum(to_num(e.get(k), 0) or 0 for e in food) for k in NUTRIENTS}
-        if correction is not None:
-            head = f"✏️ Поправка к отчёту за {fmt_day(day)}\nДобавлено или исправлено после отчёта:"
-            listed = correction
-        elif preview:
-            head = f"🕐 Промежуточный отчёт за {fmt_day(day)}"
-            listed = food
-        else:
-            head = f"📊 Отчёт за {fmt_day(day)}"
-            listed = food
-        out = [head]
-        if correction is None:
-            out += self.norms_block(totals)
-            out.append("")
-            out.append("🍽 Съедено:")
+        out = [f"🌅 Итог за {fmt_day(day)}"] + self.norms_block(totals) + ["", "🍽 Съедено:"]
         approx = False
-        for e in sorted(listed, key=lambda x: x["time"]):
+        for e in food:
             mark = ""
             if e["status"] != OK:
                 mark, approx = " ≈", True
             out.append(f"{e['time'][11:16]} {self.label(e) or e['text'][:50]} — "
                        f"{fmt_num(e.get('kcal'), 'ккал')} ккал{mark}")
-        if correction is not None:
-            out.append("")
-            out.append("Новый итог дня:")
-            out += self.norms_block(totals)
         if approx:
-            out.append("")
-            out.append("≈ — без уточнения, значения примерные.")
+            out += ["", "≈ — без уточнения, значения примерные. На вопрос можно ответить и сейчас."]
         return "\n".join(out)
