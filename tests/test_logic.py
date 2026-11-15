@@ -76,6 +76,9 @@ class FakeAI:
             return {"transcript": text, "items": [item("Сырники", 450, place="дом")]}
         if "овсянка" in text:
             return {"transcript": text, "items": [item("Овсянка", 250, place="дом")]}
+        if "ответ на сообщение бота" in text:
+            assert "без тоста" in text and "Яичница с тостом" in text
+            return {"transcript": text, "items": [item("Яичница (без тоста, с сыром)", 300, place="дом")]}
         if "Съел вариант из совета бота" in text:
             assert "Яичница" in text and "Омлет" not in text, text
             return {"transcript": text, "items": [item("Яичница с тостом", 250, place="дом")]}
@@ -361,6 +364,17 @@ def test_recipe_and_ate_button():
         "message_id": r["id"], "chat": {"id": 42}, "text": r["text"]}}})
     assert len(s.entries) == n + 1 and s.entries[-1]["item"] == "Яичница с тостом"
     assert "Калории: 550 / 2945" in tg.sent[-1]["text"], tg.sent[-1]["text"]
+
+
+def test_reply_to_recipe_with_changes():
+    s, tg, ai, bot, clock = make()
+    run(bot, clock, T(9, 9, 1), msg(1, T(9, 9), "хочу что-то с яйцами"))
+    r = tg.sent[-1]
+    m = msg(2, T(9, 9, 30), "сделал второй, но без тоста и с сыром 30 г")
+    m["message"]["reply_to_message"] = {"message_id": r["id"], "text": r["text"], "from": {"is_bot": True}}
+    run(bot, clock, T(9, 9, 31), m)
+    assert s.entries[-1]["item"].startswith("Яичница (без тоста")
+    assert tg.sent[-1]["text"].startswith("🍽")
 
 
 def test_store_helpers():

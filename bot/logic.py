@@ -192,6 +192,12 @@ class FoodBot:
                     self.s.touch(e)
                     return
 
+        # Реплай на совет или рецепт бота («сделал второй, но без тоста») — передаём ИИ и сам совет
+        rt_text = str((rt or {}).get("text") or "")
+        if rt and (rt.get("from") or {}).get("is_bot") and rt_text:
+            text = (f"{text}\n[это ответ на сообщение бота — если это рецепт или совет, пользователь съел "
+                    f"по нему с указанными изменениями: {rt_text[:1500]}]")
+
         day = assign_day(ts, self.t("day_start"))
         self.s.day(day)  # создать строку дня, если её нет
         if day > str(self.s.state.get("current_day") or ""):
