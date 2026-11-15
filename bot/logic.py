@@ -328,6 +328,9 @@ class FoodBot:
                 eaten=", ".join(f"{fmt_num(totals[k], NUTRIENT_NAMES[k][1])} {n}" for k, n in
                                 (("kcal", "ккал"), ("protein", "г белка"), ("fat", "г жиров"),
                                  ("carbs", "г углеводов"))),
+                norm=", ".join(f"{fmt_num(n['value'], NUTRIENT_NAMES[n['key']][1])} "
+                               f"{NUTRIENT_NAMES[n['key']][1]} {NUTRIENT_NAMES[n['key']][0].lower()}"
+                               for n in self.s.norms if n["key"] in ("kcal", "protein", "fat", "carbs")),
                 left=", ".join(left) or "норма закрыта", over=", ".join(over) or "нет",
                 low=", ".join(low) or "нет", purchases=self.purchases_text(7) or "(нет)",
                 usual=self.usual_text() or "(пока мало данных)", wish=wish or "нет")
