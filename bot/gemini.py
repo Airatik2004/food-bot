@@ -141,9 +141,9 @@ class Gemini:
         self.model = model
         self.web_search = web_search
 
-    def _post(self, parts, use_search, json_mode):
+    def _post(self, parts, use_search, json_mode, system=None):
         body = {
-            "systemInstruction": {"parts": [{"text": RULES}]},
+            "systemInstruction": {"parts": [{"text": system or RULES}]},
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"temperature": 0.2},
         }
@@ -155,13 +155,13 @@ class Gemini:
                           headers={"x-goog-api-key": self.key})
         return r
 
-    def _call(self, parts, use_search):
+    def _call(self, parts, use_search, system=None):
         """Один запрос; при ошибке режима JSON вместе с поиском — повтор без JSON-режима."""
         modes = [(use_search, True)] + ([(True, False)] if use_search else [])
         last_err = None
         for search, json_mode in modes:
             for retry in range(3):
-                r = self._post(parts, search, json_mode)
+                r = self._post(parts, search, json_mode, system)
                 if r.status_code in (429, 500, 503) and retry < 2:
                     time.sleep(3 * (retry + 1))
                     continue
@@ -190,22 +190,24 @@ class Gemini:
                 log.warning("Поиск не удался, оставляю оценку: %s", ex)
         return res
 
-    def suggest(self, **ctx) -> str:
-        body = {
-            "systemInstruction": {"parts": [{"text": SUGGEST_SYSTEM}]},
-            "contents": [{"role": "user", "parts": [{"text": SUGGEST_TASK.format(**ctx)}]}],
-            "generationConfig": {"temperature": 0.7},
-        }
-        for retry in range(3):
-            r = requests.post(URL.format(model=self.model), json=body, timeout=120,
-                              headers={"x-goog-api-key": self.key})
-            if r.status_code in (429, 500, 503) and retry < 2:
-                time.sleep(5 * (retry + 1))
+    def suggest(self, mode="eat", **ctx) -> dict:
+        """mode="eat" — что съесть сейчас; mode="recipe" — рецепты под пожелание."""
+        task = (RECIPE_TASK if mode == "recipe" else SUGGEST_TASK).format(**ctx) + SUGGEST_FORMAT
+        res = self._call([{"text": task}], use_search=False, system=SUGGEST_SYSTEM)
+        opts = []
+        for o in (res.get("options") or [])[:3]:
+            if not isinstance(o, dict) or not o.get("title"):
                 continue
-            break
-        if r.status_code != 200:
-            raise RuntimeError(f"Gemini {r.status_code}: {r.text[:200]}")
-        return response_text(r.json()).strip()
+            opts.append({
+                "title": str(o.get("title")).strip(), "kind": str(o.get("kind") or "").strip(),
+                "portion": str(o.get("portion") or "").strip(),
+                "ingredients": [str(x).strip() for x in (o.get("ingredients") or []) if str(x).strip()][:12],
+                "steps": [str(x).strip() for x in (o.get("steps") or []) if str(x).strip()][:6],
+                "kcal": _num(o.get("kcal")), "protein": _num(o.get("protein")),
+                "fat": _num(o.get("fat")), "carbs": _num(o.get("carbs")),
+                "time": str(o.get("time") or "").strip(), "why": str(o.get("why") or "").strip()})
+        return {"intro": str(res.get("intro") or "").strip(), "options": opts,
+                "outro": str(res.get("outro") or "").strip()}
 
     def analyze(self, time_str, text, media, dictionary_text, open_q_text,
                 history_text="", purchases_text="") -> dict:
@@ -236,11 +238,11 @@ class Gemini:
         return res
 
 
-SUGGEST_SYSTEM = """Ты помощник по питанию. Советуешь, что съесть прямо сейчас, чтобы закрыть дневную норму КБЖУ.
-Пиши по-русски, коротко, на «ты», для Telegram: без таблиц и без markdown-заголовков, можно эмодзи.
-Не выдумывай точные цифры для конкретных блюд кафе, если не уверен, — пиши «≈»."""
+SUGGEST_SYSTEM = """Ты помощник по питанию. Советуешь еду и простые рецепты, чтобы закрыть дневную норму КБЖУ.
+Пиши по-русски, коротко, на «ты». Не выдумывай точные цифры для блюд кафе — давай оценку.
+Отвечай строго JSON."""
 
-SUGGEST_TASK = """Сейчас {time} ({part_of_day}). День закрывается в {day_end}.
+CONTEXT = """Сейчас {time} ({part_of_day}). День закрывается в {day_end}.
 Съедено за сегодня: {eaten}
 Осталось до нормы: {left}
 Перебор (лучше не добавлять): {over}
@@ -249,19 +251,41 @@ SUGGEST_TASK = """Сейчас {time} ({part_of_day}). День закрывае
 Недавние покупки из чеков (скорее всего, есть дома):
 {purchases}
 
-Где и что он обычно ест (справочник и история):
+Что он обычно ест (чаще всего за последний месяц), и где:
 {usual}
+"""
 
+SUGGEST_TASK = CONTEXT + """
 Пожелание: {wish}
 
-Предложи 3 варианта, что съесть сейчас:
-1) из того, что, вероятно, есть дома (по покупкам), если подходит;
-2) что купить или заказать — лучше из его привычных мест;
-3) что быстро приготовить.
-Для каждого: что именно и сколько (граммы/штуки), ≈ ккал и Б/Ж/У, и одной фразой — почему подходит.
+Предложи 3 варианта, что съесть сейчас: kind="дома" — из того, что, вероятно, есть дома;
+kind="купить" — что купить или заказать, лучше из его привычных мест; kind="приготовить" — быстро приготовить.
 Учитывай время суток: поздно вечером — без тяжёлого и сладкого, ближе к ночи — белок и полегче.
-Если до нормы осталось мало (меньше ~150 ккал) — так и скажи, и предложи лёгкий перекус или ничего.
-В конце одной строкой — как это закроет остаток."""
+Если до нормы осталось мало (меньше ~150 ккал) — скажи об этом в intro и предложи лёгкие варианты."""
+
+RECIPE_TASK = CONTEXT + """
+Он хочет: {wish}
+
+Предложи 3 рецепта под это желание (kind="рецепт"). Ориентируйся на его вкусы — то, что он обычно ест,
+и на продукты, которые есть дома. Простые, до 20–30 минут, из обычных продуктов.
+Порцию подбери так, чтобы она вписывалась в остаток КБЖУ (особенно белок и калории).
+Для каждого: ингредиенты с граммовкой на одну порцию, 3–5 коротких шагов, КБЖУ на порцию."""
+
+SUGGEST_FORMAT = """
+
+Верни JSON:
+{
+  "intro": "одна короткая фраза: что сейчас важнее добрать или чего избегать",
+  "options": [
+    {"title": "название", "kind": "дома|купить|приготовить|рецепт",
+     "portion": "порция, например 250 г или 2 яйца + 1 тост",
+     "ingredients": ["яйца — 3 шт", "шпинат — 50 г"], "steps": ["шаг 1", "шаг 2"],
+     "time": "время готовки, например 10 мин", "kcal": 0, "protein": 0, "fat": 0, "carbs": 0,
+     "why": "одной фразой — почему подходит"}
+  ],
+  "outro": "одна строка — как это закроет остаток"
+}
+Для «купить» ингредиенты и шаги можно не указывать."""
 
 
 def media_parts(media):

@@ -76,6 +76,9 @@ class FakeAI:
             return {"transcript": text, "items": [item("Сырники", 450, place="дом")]}
         if "овсянка" in text:
             return {"transcript": text, "items": [item("Овсянка", 250, place="дом")]}
+        if "Съел вариант из совета бота" in text:
+            assert "Яичница" in text and "Омлет" not in text, text
+            return {"transcript": text, "items": [item("Яичница с тостом", 250, place="дом")]}
         if "творог" in text:
             assert "Творог с малиной" in purchases
             return {"transcript": text, "items": [item("Творог с малиной 5%", 170, place="Верейский")]}
@@ -107,9 +110,15 @@ class FakeAI:
             return {"transcript": text, "answer_to": first_id, "items": []}
         return {"transcript": text, "items": []}
 
-    def suggest(self, **ctx):
-        self.last_suggest = ctx
-        return "Творог 200 г — ≈170 ккал"
+    def suggest(self, mode="eat", **ctx):
+        self.last_suggest = dict(ctx, mode=mode)
+        return {"intro": "Добери белок", "outro": "Закроешь почти всё", "options": [
+            {"title": "Омлет со шпинатом", "kind": "рецепт", "portion": "3 яйца", "time": "10 мин",
+             "ingredients": ["яйца — 3 шт", "шпинат — 50 г"], "steps": ["взбей", "пожарь"],
+             "kcal": 260, "protein": 20, "fat": 18, "carbs": 3, "why": "много белка"},
+            {"title": "Яичница с тостом", "kind": "рецепт", "portion": "2 яйца + тост", "time": "7 мин",
+             "ingredients": ["яйца — 2 шт", "хлеб — 30 г"], "steps": ["пожарь"],
+             "kcal": 250, "protein": 14, "fat": 14, "carbs": 15, "why": "быстро"}]}
 
     def refine(self, text, it, hist, answer, media, dct, recent="", purchases=""):
         self.calls += 1
@@ -331,9 +340,27 @@ def test_eat_suggestion():
     assert "Калории 2645 ккал" in ctx["left"], ctx["left"]
     assert "Творог" in ctx["purchases"]
     eat = [m for m in tg.sent if m["text"].startswith("🍴")]
-    assert eat and eat[-1]["reply_to"] == 3
+    assert eat and eat[-1]["reply_to"] == 3 and ai.last_suggest["mode"] == "eat"
     run(bot, clock, T(9, 22, 31), msg(4, T(9, 22, 31), "/eat"))
     assert ai.last_suggest["wish"] == "нет"
+
+
+def test_recipe_and_ate_button():
+    s, tg, ai, bot, clock = make()
+    run(bot, clock, T(9, 12, 1), msg(1, T(9, 12), "сырный суп"))
+    run(bot, clock, T(9, 19, 1), msg(2, T(9, 19), "хочу что-то с яйцами"))
+    ctx = ai.last_suggest
+    assert ctx["mode"] == "recipe" and ctx["wish"] == "с яйцами"
+    assert "Сырный суп (ВкусВилл) — 1 раз" in ctx["usual"], ctx["usual"]
+    r = tg.sent[-1]
+    assert r["text"].startswith("👨‍🍳 Рецепты — с яйцами") and "1) 🍳 Омлет" in r["text"]
+    assert "Нужно: яйца — 3 шт" in r["text"] and "  1. взбей" in r["text"]
+    assert [b[0] for b in r["buttons"][0]] == ["✅ Съел 1", "✅ Съел 2"]
+    n = len(s.entries)
+    run(bot, clock, T(9, 19, 30), {"callback_query": {"id": "c", "data": "ate:2", "message": {
+        "message_id": r["id"], "chat": {"id": 42}, "text": r["text"]}}})
+    assert len(s.entries) == n + 1 and s.entries[-1]["item"] == "Яичница с тостом"
+    assert "Калории: 550 / 2945" in tg.sent[-1]["text"], tg.sent[-1]["text"]
 
 
 def test_store_helpers():

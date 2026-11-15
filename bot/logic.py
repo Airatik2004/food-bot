@@ -29,8 +29,12 @@ HELP = """Привет! Я записываю, что ты ешь, и счита
 
 Команды:
 /eat — что съесть сейчас (с учётом остатка КБЖУ и времени). Можно и текстом: «че съесть», «что бы съесть сладкое»
+/recipe — рецепты под желание и твои вкусы. Можно текстом: «хочу что-то с яйцами», «рецепт сырников», «что приготовить из курицы»
+Под советами есть кнопки «✅ Съел 1/2/3» — запишу выбранный вариант в дневник.
 /status — что ждёт уточнения"""
 
+RECIPE_RE = re.compile(r"^\s*(?:/recipe\b|рецепт\w*|что\s+(?:бы\s+)?(?:мне\s+)?приготовить|"
+                       r"хочу(?:\s+(?:что|чего)[- ]?(?:то|нибудь))?)\b[\s?!.,:]*(.*)$", re.I | re.S)
 EAT_RE = re.compile(r"^\s*(?:/eat\b|(?:ч[её]|что|чо|шо)\s+(?:бы\s+)?(?:мне\s+)?"
                     r"(?:с[ъь]?есть|поесть|покушать|пожрать)\b)[\s?!.,]*(.*)$", re.I | re.S)
 
@@ -147,9 +151,12 @@ class FoodBot:
 
     def handle_message(self, m: dict):
         text = (m.get("text") or m.get("caption") or "").strip()
-        eat = EAT_RE.match(text) if not m.get("reply_to_message") else None
-        if eat:
-            return self.suggest(eat.group(1).strip(), reply_to=m["message_id"])
+        if not m.get("reply_to_message"):
+            eat, rec = EAT_RE.match(text), RECIPE_RE.match(text)
+            if eat:
+                return self.suggest(eat.group(1).strip(), reply_to=m["message_id"])
+            if rec:
+                return self.suggest(rec.group(1).strip(), reply_to=m["message_id"], mode="recipe")
         if text.startswith("/"):
             return self.command(text.split()[0].split("@")[0].lower())
         ts = datetime.fromtimestamp(m["date"], MSK)
@@ -223,6 +230,8 @@ class FoodBot:
         data = cq.get("data", "")
         msg = cq.get("message", {})
         parts = data.split(":")
+        if parts[0] == "ate" and len(parts) > 1:
+            return self.ate_option(cq, parts[1])
         e = self.s.entry(parts[1]) if len(parts) > 1 else None
         if not e or e["status"] not in (WAITING, APPROX):
             self.tg.answer_callback(cq["id"], "Уже учтено")
@@ -249,6 +258,7 @@ class FoodBot:
             try:  # меню команд в Telegram
                 self.tg.call("setMyCommands", commands=[
                     {"command": "eat", "description": "Что съесть сейчас"},
+                    {"command": "recipe", "description": "Рецепты: /recipe с яйцами"},
                     {"command": "status", "description": "Что ждёт уточнения"},
                     {"command": "help", "description": "Как пользоваться"}])
             except Exception as ex:
@@ -270,7 +280,22 @@ class FoodBot:
             self.send("Не знаю такой команды. /help")
 
     # ---------------- «че съесть» ----------------
-    def suggest(self, wish="", reply_to=None):
+    def usual_text(self, days=30):
+        """Что он ест чаще всего (для вкуса рекомендаций) + привычные места."""
+        since = (d_(self.today()) - timedelta(days=days)).isoformat()
+        cnt = {}
+        for e in self.s.entries:
+            if e["status"] in FOOD_DONE and e["day"] >= since and e.get("item"):
+                key = e["item"] + (f" ({e['place']})" if e.get("place") and e["place"].lower() != "дом" else "")
+                cnt[key] = cnt.get(key, 0) + 1
+        top = sorted(cnt.items(), key=lambda x: -x[1])[:30]
+        lines = [f"{k} — {v} раз" for k, v in top]
+        places = sorted({str(r["place"]) for r in self.s.dictionary if r.get("place")})
+        if places:
+            lines.append("Привычные места: " + ", ".join(places[:15]))
+        return "\n".join(lines)
+
+    def suggest(self, wish="", reply_to=None, mode="eat"):
         self.process_new()  # сначала учесть то, что ещё не разобрано
         day = self.today()
         food = [e for e in self.s.entries_of(day) if e["status"] in COUNTED]
@@ -294,23 +319,68 @@ class FoodBot:
         h = now.hour
         part = ("ночь" if h < 5 else "утро" if h < 11 else "день" if h < 17
                 else "вечер" if h < 22 else "поздний вечер")
-        usual = sorted({f"{r['place']}: {r['item']} {r['variant']} {r['portion']}".strip()
-                        for r in self.s.dictionary})[-40:]
+        if mode == "recipe" and not wish:
+            wish = "что-нибудь вкусное и простое"
         try:
-            text = self.ai.suggest(
-                time=now.strftime("%H:%M"), part_of_day=part, day_end=self.s.setting("day_start"),
+            res = self.ai.suggest(
+                mode=mode, time=now.strftime("%H:%M"), part_of_day=part,
+                day_end=self.s.setting("day_start"),
                 eaten=", ".join(f"{fmt_num(totals[k], NUTRIENT_NAMES[k][1])} {n}" for k, n in
                                 (("kcal", "ккал"), ("protein", "г белка"), ("fat", "г жиров"),
                                  ("carbs", "г углеводов"))),
                 left=", ".join(left) or "норма закрыта", over=", ".join(over) or "нет",
                 low=", ".join(low) or "нет", purchases=self.purchases_text(7) or "(нет)",
-                usual="\n".join(usual) or self.history_text() or "(пока мало данных)",
-                wish=wish or "нет")
+                usual=self.usual_text() or "(пока мало данных)", wish=wish or "нет")
         except Exception as ex:
             log.exception("suggest: %s", ex)
             self.send("Не получилось придумать, попробуй ещё раз через минуту.", reply_to=reply_to)
             return
-        self.send(f"🍴 {text}", reply_to=reply_to)
+        opts = res.get("options") or []
+        if not opts:
+            self.send("Не получилось придумать, попробуй сформулировать иначе.", reply_to=reply_to)
+            return
+        head = "👨‍🍳 Рецепты" + (f" — {wish}" if wish else "") if mode == "recipe" else "🍴 Что съесть"
+        out = [head]
+        if res.get("intro"):
+            out.append(res["intro"])
+        icons = {"дома": "🏠", "купить": "🛒", "приготовить": "🍳", "рецепт": "🍳"}
+        for i, o in enumerate(opts, 1):
+            out.append("")
+            tail = f" · {o['time']}" if o.get("time") else ""
+            out.append(f"{i}) {icons.get(o['kind'].lower(), '•')} {o['title']}"
+                       + (f", {o['portion']}" if o.get("portion") else "") + tail)
+            out.append(f"≈ {fmt_num(o['kcal'], 'ккал')} ккал · Б {fmt_num(o['protein'], 'г')} · "
+                       f"Ж {fmt_num(o['fat'], 'г')} · У {fmt_num(o['carbs'], 'г')}")
+            if o.get("ingredients"):
+                out.append("Нужно: " + "; ".join(o["ingredients"]))
+            for k, st in enumerate(o.get("steps") or [], 1):
+                out.append(f"  {k}. {st}")
+            if o.get("why"):
+                out.append(f"→ {o['why']}")
+        if res.get("outro"):
+            out += ["", res["outro"]]
+        buttons = [[(f"✅ Съел {i}", f"ate:{i}") for i in range(1, len(opts) + 1)]]
+        self.send("\n".join(out), reply_to=reply_to, buttons=buttons)
+
+    def ate_option(self, cq, n):
+        """Кнопка «✅ Съел N» под советом: записать этот вариант как съеденный."""
+        msg = cq.get("message", {})
+        text = msg.get("text") or ""
+        m = re.search(rf"(?ms)^{n}\) (.*?)(?=^\d\) |\Z)", text)
+        if not m:
+            self.tg.answer_callback(cq["id"], "Не нашёл этот вариант")
+            return
+        block = m.group(1).strip()
+        title = block.split("\n")[0]
+        self.tg.answer_callback(cq["id"], "Записываю")
+        self.tg.edit_text(self.chat_id, msg.get("message_id"), text + f"\n\n✔️ Съел {n}")
+        now = self.now()
+        day = assign_day(now, self.t("day_start"))
+        self.s.day(day)
+        self.s.add_entry(day=day, time=self.stamp(now), kind="текст",
+                         text=f"Съел вариант из совета бота: {block}", status=NEW,
+                         msg_id=msg.get("message_id"), file_id="")
+        log.info("Записан вариант %s: %s", n, title)
 
     # ---------------- вопросы ----------------
     def entry_by_question(self, msg_id):
