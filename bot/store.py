@@ -206,7 +206,7 @@ class SheetStore(Store):
         self._ensure_sheets()
         self._ensure_cols(SHEET_ENTRIES, len(ENTRY_COLS))
 
-        ranges = [f"'{SHEET_ENTRIES}'!A:AF", f"'{SHEET_DAYS}'!A:S",
+        ranges = [f"'{SHEET_ENTRIES}'!A:AG", f"'{SHEET_DAYS}'!A:S",
                   f"'{SHEET_DICT}'!A:T", f"'{SHEET_NORMS}'!A:E",
                   f"'{SHEET_SETTINGS}'!A:B", f"'{SHEET_STATE}'!A:B",
                   f"'{SHEET_PURCHASES}'!A:E", f"'{SHEET_INBOX}'!A:C"]
@@ -216,11 +216,12 @@ class SheetStore(Store):
         entries, days, dct, norms, settings, state, purchases, inbox = vr
         if entries and len(entries[0]) < len(ENTRY_COLS):  # заголовки новых колонок
             self.sh.values_batch_update(body={"valueInputOption": "RAW", "data": [
-                {"range": f"'{SHEET_ENTRIES}'!AE1:AF1", "values": [["Группа фото", "Варианты"]]}]})
+                {"range": f"'{SHEET_ENTRIES}'!AE1:AG1",
+                 "values": [["Группа фото", "Варианты", "Ответ бота (id)"]]}]})
         self.entries = _rows_to_dicts(entries, ENTRY_COLS)
         for e in self.entries:
             for k in ("day", "time", "question_msg_id", "file_id", "text", "media_group",
-                      "options", "source", "status"):
+                      "options", "source", "status", "reply_msg_id"):
                 e[k] = str(e[k])
         self.days = _rows_to_dicts(days, DAY_COLS)
         for d in self.days:

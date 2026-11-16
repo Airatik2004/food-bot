@@ -43,8 +43,9 @@ class FakeTG:
     def answer_callback(self, *a, **k):
         pass
 
-    def edit_text(self, *a, **k):
-        pass
+    def edit_text(self, chat, mid, text):
+        self.edits = getattr(self, "edits", []) + [(str(mid), text)]
+        return True
 
     def download(self, fid):
         return b"data"
@@ -274,11 +275,17 @@ def test_edit():
     s, tg, ai, bot, clock = make()
     run(bot, clock, T(8, 9, 1), msg(1, T(8, 9), "сырники"))
     assert s.entry(1)["kcal"] == 450
+    first_reply = tg.sent[-1]
+    assert s.entry(1)["reply_msg_id"] == str(first_reply["id"])
+    n = len(tg.sent)
     run(bot, clock, T(8, 9, 5), msg(1, T(8, 9), "овсянка", edited=True))
     old, new = s.entry(1), s.entries[-1]
     assert old["status"] == "изменено" and old["kcal"] == ""
     assert new["item"] == "Овсянка" and new["msg_id"] == 1 and new["time"] == old["time"]
-    assert tg.sent[-1]["text"].startswith("✏️ Исправил") and "Калории: 250 / 2945" in tg.sent[-1]["text"]
+    assert len(tg.sent) == n, "новое сообщение не отправлено — исправлен прежний ответ"
+    mid, text = tg.edits[-1]
+    assert mid == str(first_reply["id"]) and text.startswith("✏️ Исправлено")
+    assert "Калории: 250 / 2945" in text and new["reply_msg_id"] == mid
 
 
 def test_yesterday_flag():

@@ -229,7 +229,8 @@ class FoodBot:
         new = self.s.add_entry(day=first["day"], time=first["time"], kind=first["kind"],
                                text=text, status=NEW, msg_id=mid,
                                file_id=first.get("file_id") or file_id,
-                               media_group=first.get("media_group", ""))
+                               media_group=first.get("media_group", ""),
+                               reply_msg_id=first.get("reply_msg_id", ""))
         self.edited_ids.add(new["id"])
 
     def handle_callback(self, cq: dict):
@@ -539,7 +540,7 @@ class FoodBot:
                 "сегодня" if d == self.today() else fmt_day(d) for d in days) + ":"
             total_day = days[-1]
         else:
-            head = "✏️ Исправил:" if edited else ("🧾 Покупки сохранил, в съеденное записал:" if receipt else "🍽")
+            head = "✏️ Исправлено:" if edited else ("🧾 Покупки сохранил, в съеденное записал:" if receipt else "🍽")
             total_day = e["day"]
         lines = []
         for r in rows:
@@ -548,8 +549,15 @@ class FoodBot:
             lines.append(f"• {self.label(r)} — {approx}{fmt_num(r['kcal'], 'ккал')} ккал "
                          f"(Б {fmt_num(r['protein'], 'г')} · Ж {fmt_num(r['fat'], 'г')} · "
                          f"У {fmt_num(r['carbs'], 'г')}){tail}")
-        self.send(f"{head}\n" + "\n".join(lines) + "\n\n" + self.day_block(total_day),
-                  reply_to=e["msg_id"])
+        text = f"{head}\n" + "\n".join(lines) + "\n\n" + self.day_block(total_day)
+        old_reply = str(e.get("reply_msg_id") or "")
+        if edited and old_reply and self.tg.edit_text(self.chat_id, old_reply, text):
+            reply_id = old_reply   # исправили свой прежний ответ вместо нового сообщения
+        else:
+            reply_id = str(self.send(text, reply_to=e["msg_id"])["message_id"])
+        for r in rows:
+            r["reply_msg_id"] = reply_id
+            self.s.touch(r)
         for r in rows:
             if r["status"] == NEED_ASK:
                 self.ask(r)

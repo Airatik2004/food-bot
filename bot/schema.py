@@ -20,10 +20,11 @@ SHEET_STATE = "Служебное"
 SHEET_PURCHASES = "Покупки"
 SHEET_INBOX = "Входящие"
 
-# Порядок колонок листа «Записи» (A..AF)
+# Порядок колонок листа «Записи» (A..AG)
 ENTRY_COLS = ["id", "day", "time", "kind", "text", "item", "place", "variant",
               "amount", "grams", *NUTRIENTS, "status", "question", "answers",
-              "source", "msg_id", "question_msg_id", "file_id", "media_group", "options"]
+              "source", "msg_id", "question_msg_id", "file_id", "media_group", "options",
+              "reply_msg_id"]
 
 # Порядок колонок листа «Итоги» (A..S). C..P заполняются формулами.
 DAY_COLS = ["day", "phase", *NUTRIENTS, "approx", "report_at", "last_reminder",

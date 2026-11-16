@@ -58,11 +58,13 @@ class Telegram:
         except Exception as ex:  # старые нажатия Telegram уже не принимает — не страшно
             log.info("answerCallbackQuery: %s", ex)
 
-    def edit_text(self, chat_id, message_id, text):
+    def edit_text(self, chat_id, message_id, text) -> bool:
         try:
             self.call("editMessageText", chat_id=chat_id, message_id=message_id, text=text)
+            return True
         except Exception as ex:
             log.info("editMessageText: %s", ex)
+            return "not modified" in str(ex)
 
     def download(self, file_id) -> bytes:
         f = self.call("getFile", file_id=file_id)
