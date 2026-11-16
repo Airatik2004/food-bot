@@ -28,6 +28,7 @@ HELP = """Привет! Я записываю, что ты ешь, и счита
 • Новый день начинается в {start}: всё, что съел ночью, идёт во вчера. В {start} пришлю итог за прошедший день; неотвеченное посчитаю «примерно» (ответить можно и потом).
 
 Команды:
+/day — отчёт за сегодня на текущий момент: все показатели против нормы и что съедено
 /eat — что съесть сейчас (с учётом остатка КБЖУ и времени). Можно и текстом: «че съесть», «что бы съесть сладкое»
 /recipe — рецепты под желание и твои вкусы. Можно текстом: «хочу что-то с яйцами», «рецепт сырников», «что приготовить из курицы»
 /plan — меню на день: «составь меню на завтра», «рацион на сегодня»
@@ -277,6 +278,7 @@ class FoodBot:
         if cmd == "/start" and hasattr(self.tg, "call"):
             try:  # меню команд в Telegram
                 self.tg.call("setMyCommands", commands=[
+                    {"command": "day", "description": "Сколько съедено за сегодня"},
                     {"command": "eat", "description": "Что съесть сейчас"},
                     {"command": "recipe", "description": "Рецепты: /recipe с яйцами"},
                     {"command": "plan", "description": "Меню на день: /plan на завтра"},
@@ -287,8 +289,9 @@ class FoodBot:
                 log.info("setMyCommands: %s", ex)
         if cmd in ("/start", "/help"):
             self.send(HELP.format(start=self.s.setting("day_start")))
-        elif cmd == "/report":
-            self.send(self.day_block(self.today()))
+        elif cmd in ("/day", "/report"):
+            self.process_new()
+            self.send(self.day_report(self.today()))
         elif cmd == "/status":
             open_ = [e for e in self.s.entries if e["status"] in OPEN]
             if not open_:
@@ -821,6 +824,25 @@ class FoodBot:
                 tail = "" if ok else f" ({pct:+.0f}%)"
             lines.append(f"{icon} {name}: {fmt_num(val, unit)} / {sign}{fmt_num(norm, unit)} {unit}{tail}")
         return lines
+
+    def day_report(self, day) -> str:
+        """Отчёт за текущий день «на сейчас» (команда /day)."""
+        food = sorted([e for e in self.s.entries_of(day) if e["status"] in COUNTED],
+                      key=lambda x: x["time"])
+        totals = {k: sum(to_num(e.get(k), 0) or 0 for e in food) for k in NUTRIENTS}
+        out = [f"📊 Сегодня, {fmt_day(day)} — на {self.now().strftime('%H:%M')}"]
+        out += self.norms_block(totals, live=True)
+        out += ["", "🍽 Съедено:" if food else "🍽 Пока ничего не записано."]
+        approx = False
+        for e in food:
+            mark = ""
+            if e["status"] != OK:
+                mark, approx = " ≈", True
+            out.append(f"{e['time'][11:16]} {self.label(e) or e['text'][:50]} — "
+                       f"{fmt_num(e.get('kcal'), 'ккал')} ккал{mark}")
+        if approx:
+            out += ["", "≈ — ждут уточнения, значения примерные."]
+        return "\n".join(out)
 
     def summary_text(self, day) -> str:
         food = sorted([e for e in self.s.entries_of(day) if e["status"] in FOOD_DONE],

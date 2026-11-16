@@ -411,6 +411,17 @@ def test_salt_warning():
     assert "⚠️" not in tg.sent[-1]["text"].split("📊")[0]
 
 
+def test_day_command():
+    s, tg, ai, bot, clock = make()
+    run(bot, clock, T(9, 9, 1), msg(1, T(9, 9), "сырный суп"))
+    run(bot, clock, T(9, 13, 1), msg(2, T(9, 13), "раф из серфа"))
+    run(bot, clock, T(9, 18, 15), msg(3, T(9, 18, 15), "/day"))
+    r = tg.sent[-1]["text"]
+    assert r.startswith("📊 Сегодня, пн, 9 ноября — на 18:15"), r
+    assert "Калории: 650 / 2945" in r and "09:00 Сырный суп" in r and "≈" in r
+    assert len([e for e in s.entries if e["text"] == "/day"]) == 0
+
+
 def test_store_helpers():
     assert to_cell("2026-11-08") == "'2026-11-08"
     assert to_cell(5) == 5 and to_cell(None) == ""
