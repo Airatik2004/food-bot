@@ -402,6 +402,15 @@ def test_plan_shop_and_free_request():
     assert tg.sent[-1]["text"].startswith("🍴") and s.entries[-1]["status"] == "не еда"
 
 
+def test_salt_warning():
+    s, tg, ai, bot, clock = make()
+    run(bot, clock, T(9, 12, 1), msg(1, T(9, 12), "плов из чайзоны"))  # na = 800 из 2000 → 40%
+    summary = [m for m in tg.sent if m["text"].startswith("🍽")][-1]["text"]
+    assert "⚠️ Плов — 40% дневной нормы (натрий); остаток дня лучше без соли" in summary, summary
+    run(bot, clock, T(9, 13, 1), msg(2, T(9, 13), "сырный суп"))       # 300 мг → без предупреждения
+    assert "⚠️" not in tg.sent[-1]["text"].split("📊")[0]
+
+
 def test_store_helpers():
     assert to_cell("2026-11-08") == "'2026-11-08"
     assert to_cell(5) == 5 and to_cell(None) == ""

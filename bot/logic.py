@@ -585,7 +585,9 @@ class FoodBot:
             lines.append(f"• {self.label(r)} — {approx}{fmt_num(r['kcal'], 'ккал')} ккал "
                          f"(Б {fmt_num(r['protein'], 'г')} · Ж {fmt_num(r['fat'], 'г')} · "
                          f"У {fmt_num(r['carbs'], 'г')}){tail}")
-        text = f"{head}\n" + "\n".join(lines) + "\n\n" + self.day_block(total_day)
+        warn = self.limit_warnings(rows, total_day)
+        text = (f"{head}\n" + "\n".join(lines) + ("\n\n" + "\n".join(warn) if warn else "")
+                + "\n\n" + self.day_block(total_day))
         old_reply = str(e.get("reply_msg_id") or "")
         if edited and old_reply and self.tg.edit_text(self.chat_id, old_reply, text):
             reply_id = old_reply   # исправили свой прежний ответ вместо нового сообщения
@@ -688,7 +690,9 @@ class FoodBot:
         if e["status"] == OK:
             self.send(f"✅ {self.label(e)} — {fmt_num(e['kcal'], 'ккал')} ккал "
                       f"(Б {fmt_num(e['protein'], 'г')} · Ж {fmt_num(e['fat'], 'г')} · "
-                      f"У {fmt_num(e['carbs'], 'г')})\n\n" + self.day_block(e["day"]),
+                      f"У {fmt_num(e['carbs'], 'г')})\n\n"
+                      + "".join(w + "\n\n" for w in self.limit_warnings([e], e["day"]))
+                      + self.day_block(e["day"]),
                       reply_to=reply_to)
         else:
             self.ask(e)
@@ -706,6 +710,27 @@ class FoodBot:
         self.s.add_entry(day=e["day"], time=self.stamp(), kind=kind,
                          text=(text + " (из чека)").strip(), status=NEW,
                          msg_id=msg_id or e["msg_id"], file_id=file_id)
+
+    def limit_warnings(self, rows, day) -> list[str]:
+        """Если одна позиция съедает большую часть лимита «не больше» (натрий, сахар) — предупредить."""
+        tips = {"na": "остаток дня лучше без соли: без колбасы, сыра, хлеба, соусов и готовой еды",
+                "sugar": "дальше лучше без сладкого и сладких напитков"}
+        food = [e for e in self.s.entries_of(day) if e["status"] in COUNTED]
+        out = []
+        for n in self.s.norms:
+            key, norm = n["key"], float(n["value"] or 0)
+            if "больше" not in str(n["type"]).lower() or not norm or key not in NUTRIENTS:
+                continue
+            name = NUTRIENT_NAMES[key][0].lower()
+            for r in rows:
+                share = (to_num(r.get(key), 0) or 0) / norm
+                if share >= 0.4:
+                    total = sum(to_num(e.get(key), 0) or 0 for e in food) / norm
+                    tail = tips.get(key, "дальше лучше полегче") if total < 1 else \
+                        f"за день уже {round(total * 100)}% — {tips.get(key, 'дальше полегче')}"
+                    out.append(f"⚠️ {r.get('item') or 'Эта позиция'} — {round(share * 100)}% "
+                               f"дневной нормы ({name}); {tail}.")
+        return out
 
     def day_block(self, day) -> str:
         """Полная картина дня — добавляется к каждому ответу."""
