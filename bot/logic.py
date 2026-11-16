@@ -280,9 +280,9 @@ class FoodBot:
                 self.tg.call("setMyCommands", commands=[
                     {"command": "day", "description": "Сколько съедено за сегодня"},
                     {"command": "eat", "description": "Что съесть сейчас"},
-                    {"command": "recipe", "description": "Рецепты: /recipe с яйцами"},
-                    {"command": "plan", "description": "Меню на день: /plan на завтра"},
-                    {"command": "shop", "description": "Что купить: /shop во ВкусВилле"},
+                    {"command": "recipe", "description": "Рецепты"},
+                    {"command": "plan", "description": "Меню на день"},
+                    {"command": "shop", "description": "Что купить"},
                     {"command": "status", "description": "Что ждёт уточнения"},
                     {"command": "help", "description": "Как пользоваться"}])
             except Exception as ex:
