@@ -281,7 +281,7 @@ class FoodBot:
                     {"command": "day", "description": "Сколько съедено за сегодня"},
                     {"command": "eat", "description": "Что съесть сейчас"},
                     {"command": "recipe", "description": "Рецепты"},
-                    {"command": "plan", "description": "Меню на день"},
+                    {"command": "plan", "description": "Меню"},
                     {"command": "shop", "description": "Что купить"},
                     {"command": "status", "description": "Что ждёт уточнения"},
                     {"command": "help", "description": "Как пользоваться"}])
