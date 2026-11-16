@@ -1,14 +1,18 @@
 """Структура таблицы: названия листов и колонок. Должна совпадать с Google Таблицей."""
 
-NUTRIENTS = ["kcal", "protein", "fat", "carbs", "sugar", "fiber",
-             "na", "k", "ca", "mg", "fe", "zn", "p"]
+# BASE_NUTRIENTS стоят в таблицах подряд; EXTRA_NUTRIENTS добавлены позже и стоят в конце строк,
+# чтобы не сдвигать старые колонки
+BASE_NUTRIENTS = ["kcal", "protein", "fat", "carbs", "sugar", "fiber",
+                  "na", "k", "ca", "mg", "fe", "zn", "p"]
+EXTRA_NUTRIENTS = ["creatine"]
+NUTRIENTS = BASE_NUTRIENTS + EXTRA_NUTRIENTS
 
 NUTRIENT_NAMES = {
     "kcal": ("Калории", "ккал"), "protein": ("Белки", "г"), "fat": ("Жиры", "г"),
     "carbs": ("Углеводы", "г"), "sugar": ("Добавленный сахар", "г"), "fiber": ("Клетчатка", "г"),
     "na": ("Натрий", "мг"), "k": ("Калий", "мг"), "ca": ("Кальций", "мг"),
     "mg": ("Магний", "мг"), "fe": ("Железо", "мг"), "zn": ("Цинк", "мг"),
-    "p": ("Фосфор", "мг"),
+    "p": ("Фосфор", "мг"), "creatine": ("Креатин", "г"),
 }
 
 SHEET_ENTRIES = "Записи"
@@ -21,25 +25,25 @@ SHEET_PURCHASES = "Покупки"
 SHEET_INBOX = "Входящие"
 SHEET_SUPPS = "Бады"
 
-# Порядок колонок листа «Записи» (A..AG)
+# Порядок колонок листа «Записи» (A..AH)
 ENTRY_COLS = ["id", "day", "time", "kind", "text", "item", "place", "variant",
-              "amount", "grams", *NUTRIENTS, "status", "question", "answers",
+              "amount", "grams", *BASE_NUTRIENTS, "status", "question", "answers",
               "source", "msg_id", "question_msg_id", "file_id", "media_group", "options",
-              "reply_msg_id"]
+              "reply_msg_id", *EXTRA_NUTRIENTS]
 
-# Порядок колонок листа «Итоги» (A..S). C..P заполняются формулами.
-DAY_COLS = ["day", "phase", *NUTRIENTS, "approx", "report_at", "last_reminder",
-            "correction_at"]
+# Порядок колонок листа «Итоги» (A..T). Нутриенты и approx заполняются формулами.
+DAY_COLS = ["day", "phase", *BASE_NUTRIENTS, "approx", "report_at", "last_reminder",
+            "correction_at", *EXTRA_NUTRIENTS]
 
-# Порядок колонок листа «Справочник» (A..T)
-DICT_COLS = ["place", "item", "variant", "portion", "grams", *NUTRIENTS,
-             "source", "added"]
+# Порядок колонок листа «Справочник» (A..U)
+DICT_COLS = ["place", "item", "variant", "portion", "grams", *BASE_NUTRIENTS,
+             "source", "added", *EXTRA_NUTRIENTS]
 
 # Лист «Покупки» (A..E) — товары из чеков, подсказка для будущих записей
 PURCHASE_COLS = ["date", "name", "brand", "amount", "grams"]
 
 # Лист «Бады» (A..H): какие бады в какой приём и что из них идёт в нормы
-SUPP_COLS = ["slot", "name", "count", "kcal", "fat", "mg", "zn", "note"]
+SUPP_COLS = ["slot", "name", "count", "kcal", "fat", "mg", "zn", "note", "creatine"]
 
 STATE_KEYS = ["last_update_id", "current_day", "awaiting"]
 

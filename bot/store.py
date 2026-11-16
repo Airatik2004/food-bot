@@ -170,9 +170,8 @@ def day_formulas(row: int, sep: str = ",") -> dict:
     """Формулы итогов дня: суммы по листу «Записи» за этот день.
     sep — разделитель аргументов: «;» для русской локали таблицы, «,» для английской."""
     f = {}
-    src_start = ENTRY_COLS.index("kcal")
-    for i, n in enumerate(NUTRIENTS):
-        letter = col_letter(src_start + i)
+    for n in NUTRIENTS:
+        letter = col_letter(ENTRY_COLS.index(n))
         f[n] = Formula(f"=SUMIFS('{SHEET_ENTRIES}'!{letter}:{letter}{sep}"
                        f"'{SHEET_ENTRIES}'!$B:$B{sep}$A{row})")
     st = col_letter(ENTRY_COLS.index("status"))
@@ -208,12 +207,13 @@ class SheetStore(Store):
         self._ensure_sheets()
         self._ensure_cols(SHEET_ENTRIES, len(ENTRY_COLS))
 
-        ranges = [f"'{SHEET_ENTRIES}'!A:AG", f"'{SHEET_DAYS}'!A:S",
-                  f"'{SHEET_DICT}'!A:T", f"'{SHEET_NORMS}'!A:E",
+        L = lambda cols: col_letter(len(cols) - 1)
+        ranges = [f"'{SHEET_ENTRIES}'!A:{L(ENTRY_COLS)}", f"'{SHEET_DAYS}'!A:{L(DAY_COLS)}",
+                  f"'{SHEET_DICT}'!A:{L(DICT_COLS)}", f"'{SHEET_NORMS}'!A:E",
                   f"'{SHEET_SETTINGS}'!A:B", f"'{SHEET_STATE}'!A:B",
                   f"'{SHEET_PURCHASES}'!A:E", f"'{SHEET_INBOX}'!A:C"]
         if SHEET_SUPPS in self.sheet_ids:
-            ranges.append(f"'{SHEET_SUPPS}'!A:H")
+            ranges.append(f"'{SHEET_SUPPS}'!A:{L(SUPP_COLS)}")
         res = self.sh.values_batch_get(
             ranges, params={"valueRenderOption": "UNFORMATTED_VALUE"})
         vr = [x.get("values", []) for x in res["valueRanges"]]
@@ -221,8 +221,8 @@ class SheetStore(Store):
         self.supps = _rows_to_dicts(vr[8], SUPP_COLS) if len(vr) > 8 else []
         if entries and len(entries[0]) < len(ENTRY_COLS):  # заголовки новых колонок
             self.sh.values_batch_update(body={"valueInputOption": "RAW", "data": [
-                {"range": f"'{SHEET_ENTRIES}'!AE1:AG1",
-                 "values": [["Группа фото", "Варианты", "Ответ бота (id)"]]}]})
+                {"range": f"'{SHEET_ENTRIES}'!AE1:AH1",
+                 "values": [["Группа фото", "Варианты", "Ответ бота (id)", "Креатин, г"]]}]})
         self.entries = _rows_to_dicts(entries, ENTRY_COLS)
         for e in self.entries:
             for k in ("day", "time", "question_msg_id", "file_id", "text", "media_group",

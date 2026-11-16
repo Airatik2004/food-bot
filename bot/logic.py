@@ -366,6 +366,7 @@ class FoodBot:
                 nutr["fat"] += (to_num(r.get("fat"), 0) or 0) * cnt
                 nutr["mg"] += (to_num(r.get("mg"), 0) or 0) * cnt
                 nutr["zn"] += (to_num(r.get("zn"), 0) or 0) * cnt
+                nutr["creatine"] += (to_num(r.get("creatine"), 0) or 0) * cnt
             names = ", ".join(f"{r['name']} ×{to_num(r.get('count'), 1) or 1}" for r in rows)
             e = self.s.add_entry(day=day, time=self.stamp(now), kind="бад", text=f"бады: {slot}",
                                  item=item, amount=names, status=OK, source="бады", msg_id=reply_to or "")
@@ -381,7 +382,8 @@ class FoodBot:
             out.append("В листе «Бады» нет таких приёмов.")
         food = [e for e in self.s.entries_of(day) if e["status"] in COUNTED]
         totals = {k: sum(to_num(e.get(k), 0) or 0 for e in food) for k in NUTRIENTS}
-        lines = [l for l in self.norms_block(totals, live=True) if "Магний" in l or "Цинк" in l]
+        lines = [l for l in self.norms_block(totals, live=True)
+                 if "Магний" in l or "Цинк" in l or "Креатин" in l]
         if lines:
             out.append("\n".join(lines))
         self.send("\n\n".join(out), reply_to=reply_to)
