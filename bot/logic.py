@@ -782,8 +782,8 @@ class FoodBot:
             if not norm:
                 continue
             pct = (val / norm - 1) * 100
-            if "больше" in typ:      # «не больше»
-                ok, sign = val <= norm * (1 + tol), "≤"
+            if "больше" in typ:      # «не больше»: превышение видно сразу
+                ok, sign = val <= norm, "≤"
             elif "меньше" in typ:    # «не меньше»
                 ok, sign = val >= norm * (1 - tol), "≥"
             else:
@@ -791,7 +791,8 @@ class FoodBot:
             if live and not ok and pct < 0:
                 icon, tail = "⏳", f" (ещё {fmt_num(norm - val, unit)})"
             else:
-                icon = "✅" if ok else ("🔺" if pct > 0 else "🔻")
+                icon = "✅" if ok else ("🔻" if pct < 0 else
+                                         "⚠️" if sign == "≤" and pct <= tol * 100 else "🔺")
                 tail = "" if ok else f" ({pct:+.0f}%)"
             lines.append(f"{icon} {name}: {fmt_num(val, unit)} / {sign}{fmt_num(norm, unit)} {unit}{tail}")
         return lines
