@@ -422,6 +422,30 @@ def test_day_command():
     assert len([e for e in s.entries if e["text"] == "/day"]) == 0
 
 
+def test_supplements():
+    s, tg, ai, bot, clock = make()
+    s.norms += [{"key": "mg", "value": 400, "type": "не меньше", "unit": "мг"},
+                {"key": "zn", "value": 11, "type": "не меньше", "unit": "мг"}]
+    s.supps = [{"slot": "утро", "name": "Цинк", "count": 1, "zn": 25},
+               {"slot": "утро", "name": "Омега-3", "count": 1, "kcal": 9, "fat": 1},
+               {"slot": "вечер", "name": "Магний B6", "count": 4, "mg": 113},
+               {"slot": "вечер", "name": "Омега-3", "count": 1, "kcal": 9, "fat": 1}]
+    run(bot, clock, T(9, 8, 1), msg(1, T(9, 8), "выпил утренние бады"))
+    r = tg.sent[-1]["text"]
+    assert "💊 Отметил бады:\n• утро: Цинк ×1, Омега-3 ×1" in r and "Цинк: 25 / ≥11" in r, r
+    run(bot, clock, T(9, 8, 2), msg(2, T(9, 8, 1), "бады утро"))
+    assert "Уже отмечено сегодня: утро" in tg.sent[-1]["text"]
+    run(bot, clock, T(9, 21, 1), msg(3, T(9, 21), "бады"))
+    q = tg.sent[-1]
+    assert q["buttons"][0][2] == ("✅ Вечер", "supp:вечер")
+    run(bot, clock, T(9, 21, 2), {"callback_query": {"id": "c", "data": "supp:вечер", "message": {
+        "message_id": q["id"], "chat": {"id": 42}, "text": q["text"]}}})
+    assert "Магний: 452 / ≥400" in tg.sent[-1]["text"], tg.sent[-1]["text"]
+    sup = [e for e in s.entries if e["kind"] == "бад"]
+    assert len(sup) == 2 and sum(e["kcal"] for e in sup) == 18
+    assert "Бады" not in bot.history_text() and "Бады" not in bot.usual_text()
+
+
 def test_store_helpers():
     assert to_cell("2026-11-08") == "'2026-11-08"
     assert to_cell(5) == 5 and to_cell(None) == ""

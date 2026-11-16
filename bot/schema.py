@@ -19,6 +19,7 @@ SHEET_SETTINGS = "Настройки"
 SHEET_STATE = "Служебное"
 SHEET_PURCHASES = "Покупки"
 SHEET_INBOX = "Входящие"
+SHEET_SUPPS = "Бады"
 
 # Порядок колонок листа «Записи» (A..AG)
 ENTRY_COLS = ["id", "day", "time", "kind", "text", "item", "place", "variant",
@@ -36,6 +37,9 @@ DICT_COLS = ["place", "item", "variant", "portion", "grams", *NUTRIENTS,
 
 # Лист «Покупки» (A..E) — товары из чеков, подсказка для будущих записей
 PURCHASE_COLS = ["date", "name", "brand", "amount", "grams"]
+
+# Лист «Бады» (A..H): какие бады в какой приём и что из них идёт в нормы
+SUPP_COLS = ["slot", "name", "count", "kcal", "fat", "mg", "zn", "note"]
 
 STATE_KEYS = ["last_update_id", "current_day", "awaiting"]
 

@@ -10,7 +10,8 @@ from datetime import datetime
 
 from .schema import (COLLECT, DAY_COLS, DICT_COLS, ENTRY_COLS, NUTRIENTS, PURCHASE_COLS,
                      SHEET_DAYS, SHEET_DICT, SHEET_ENTRIES, SHEET_INBOX, SHEET_NORMS,
-                     SHEET_PURCHASES, SHEET_SETTINGS, SHEET_STATE, STATE_KEYS, col_letter)
+                     SHEET_PURCHASES, SHEET_SETTINGS, SHEET_STATE, SHEET_SUPPS, STATE_KEYS,
+                     SUPP_COLS, col_letter)
 
 
 class Formula(str):
@@ -62,6 +63,7 @@ class Store:
         self.days: list[dict] = []
         self.dictionary: list[dict] = []
         self.purchases: list[dict] = []
+        self.supps: list[dict] = []      # slot, name, count, kcal, fat, mg, zn, note
         self.inbox: list[dict] = []      # update_id, update (dict)
         self.state: dict = {"last_update_id": 0, "current_day": "", "awaiting": ""}
         self.formula_sep = ","
@@ -210,10 +212,13 @@ class SheetStore(Store):
                   f"'{SHEET_DICT}'!A:T", f"'{SHEET_NORMS}'!A:E",
                   f"'{SHEET_SETTINGS}'!A:B", f"'{SHEET_STATE}'!A:B",
                   f"'{SHEET_PURCHASES}'!A:E", f"'{SHEET_INBOX}'!A:C"]
+        if SHEET_SUPPS in self.sheet_ids:
+            ranges.append(f"'{SHEET_SUPPS}'!A:H")
         res = self.sh.values_batch_get(
             ranges, params={"valueRenderOption": "UNFORMATTED_VALUE"})
         vr = [x.get("values", []) for x in res["valueRanges"]]
-        entries, days, dct, norms, settings, state, purchases, inbox = vr
+        entries, days, dct, norms, settings, state, purchases, inbox = vr[:8]
+        self.supps = _rows_to_dicts(vr[8], SUPP_COLS) if len(vr) > 8 else []
         if entries and len(entries[0]) < len(ENTRY_COLS):  # заголовки новых колонок
             self.sh.values_batch_update(body={"valueInputOption": "RAW", "data": [
                 {"range": f"'{SHEET_ENTRIES}'!AE1:AG1",

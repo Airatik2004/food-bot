@@ -29,6 +29,7 @@ HELP = """Привет! Я записываю, что ты ешь, и счита
 
 Команды:
 /day — отчёт за сегодня на текущий момент: все показатели против нормы и что съедено
+/supps — отметить бады (утро / день / вечер). Можно текстом: «выпил утренние бады», «бады все»
 /eat — что съесть сейчас (с учётом остатка КБЖУ и времени). Можно и текстом: «че съесть», «что бы съесть сладкое»
 /recipe — рецепты под желание и твои вкусы. Можно текстом: «хочу что-то с яйцами», «рецепт сырников», «что приготовить из курицы»
 /plan — меню на день: «составь меню на завтра», «рацион на сегодня»
@@ -43,6 +44,24 @@ PLAN_RE = re.compile(r"^\s*(?:/plan\b|(?:составь|сделай|дай|пр
                      r"(?:меню|рацион|диет\w*|план\s+питания)(?=\s*(?:на\b|$|[?!.,])))[\s?!.,:]*(.*)$", re.I | re.S)
 SHOP_RE = re.compile(r"^\s*(?:/shop\b|(?:ч[её]|что|чо|шо)\s+(?:бы\s+)?(?:мне\s+)?купить)\b[\s?!.,:]*(.*)$",
                      re.I | re.S)
+SUPP_SLOTS = ("утро", "день", "вечер")
+
+
+def supp_slots(text: str):
+    """«выпил утренние бады» → ["утро"]; «бады все» → все три; без времени → [] (покажем кнопки)."""
+    t = text.lower()
+    if re.search(r"\bвс[её]\b|\bвсе\b", t):
+        return list(SUPP_SLOTS)
+    out = []
+    if re.search(r"утр", t):
+        out.append("утро")
+    if re.search(r"дн[её]м|\bдень|дневн|обед", t):
+        out.append("день")
+    if re.search(r"веч", t):
+        out.append("вечер")
+    return out
+
+
 EAT_RE = re.compile(r"^\s*(?:/eat\b|(?:ч[её]|что|чо|шо)\s+(?:бы\s+)?(?:мне\s+)?"
                     r"(?:с[ъь]?есть|поесть|покушать|пожрать)\b)[\s?!.,]*(.*)$", re.I | re.S)
 
@@ -159,6 +178,9 @@ class FoodBot:
 
     def handle_message(self, m: dict):
         text = (m.get("text") or m.get("caption") or "").strip()
+        if not m.get("reply_to_message") and (text.lower().startswith("/supp")
+                                              or (re.search(r"\bбад", text, re.I) and len(text) < 60)):
+            return self.supps(supp_slots(text), reply_to=m["message_id"])
         if not m.get("reply_to_message"):
             eat, rec = EAT_RE.match(text), RECIPE_RE.match(text)
             plan, shop = PLAN_RE.match(text), SHOP_RE.match(text)
@@ -253,6 +275,12 @@ class FoodBot:
         parts = data.split(":")
         if parts[0] == "ate" and len(parts) > 1:
             return self.ate_option(cq, parts[1])
+        if parts[0] == "supp" and len(parts) > 1:
+            slots = list(SUPP_SLOTS) if parts[1] == "все" else [parts[1]]
+            self.tg.answer_callback(cq["id"], "Отмечаю")
+            self.tg.edit_text(self.chat_id, msg.get("message_id"),
+                              (msg.get("text") or "") + f"\n✔️ {parts[1]}")
+            return self.supps(slots, reply_to=None)
         e = self.s.entry(parts[1]) if len(parts) > 1 else None
         if not e or e["status"] not in (WAITING, APPROX):
             self.tg.answer_callback(cq["id"], "Уже учтено")
@@ -279,6 +307,7 @@ class FoodBot:
             try:  # меню команд в Telegram
                 self.tg.call("setMyCommands", commands=[
                     {"command": "day", "description": "Сколько съедено за сегодня"},
+                    {"command": "supps", "description": "Бады"},
                     {"command": "eat", "description": "Что съесть сейчас"},
                     {"command": "recipe", "description": "Рецепты"},
                     {"command": "plan", "description": "Меню"},
@@ -304,13 +333,62 @@ class FoodBot:
         else:
             self.send("Не знаю такой команды. /help")
 
+    # ---------------- бады ----------------
+    def supps(self, slots, reply_to=None):
+        if not self.s.supps:
+            self.send("Список бадов пуст — заполни лист «Бады» в таблице.", reply_to=reply_to)
+            return
+        if not slots:
+            self.send("💊 Какие бады отметить?", reply_to=reply_to, buttons=[
+                [("✅ Утро", "supp:утро"), ("✅ День", "supp:день"), ("✅ Вечер", "supp:вечер")],
+                [("✅ Все за день", "supp:все")]])
+            return
+        now = self.now()
+        day = assign_day(now, self.t("day_start"))
+        self.s.day(day)
+        done, already = [], []
+        for slot in slots:
+            item = f"Бады ({slot})"
+            if any(e["item"] == item and e["status"] == OK for e in self.s.entries_of(day)):
+                already.append(slot)
+                continue
+            rows = [r for r in self.s.supps if str(r["slot"]).strip().lower().startswith(slot[:3])]
+            if not rows:
+                continue
+            nutr = {k: 0 for k in NUTRIENTS}
+            for r in rows:
+                cnt = to_num(r.get("count"), 1) or 1
+                nutr["kcal"] += (to_num(r.get("kcal"), 0) or 0) * cnt
+                nutr["fat"] += (to_num(r.get("fat"), 0) or 0) * cnt
+                nutr["mg"] += (to_num(r.get("mg"), 0) or 0) * cnt
+                nutr["zn"] += (to_num(r.get("zn"), 0) or 0) * cnt
+            names = ", ".join(f"{r['name']} ×{to_num(r.get('count'), 1) or 1}" for r in rows)
+            e = self.s.add_entry(day=day, time=self.stamp(now), kind="бад", text=f"бады: {slot}",
+                                 item=item, amount=names, status=OK, source="бады", msg_id=reply_to or "")
+            for k in NUTRIENTS:
+                e[k] = round(nutr[k], 1)
+            done.append(f"• {slot}: {names}")
+        out = []
+        if done:
+            out.append("💊 Отметил бады:\n" + "\n".join(done))
+        if already:
+            out.append("Уже отмечено сегодня: " + ", ".join(already) + ".")
+        if not done and not already:
+            out.append("В листе «Бады» нет таких приёмов.")
+        food = [e for e in self.s.entries_of(day) if e["status"] in COUNTED]
+        totals = {k: sum(to_num(e.get(k), 0) or 0 for e in food) for k in NUTRIENTS}
+        lines = [l for l in self.norms_block(totals, live=True) if "Магний" in l or "Цинк" in l]
+        if lines:
+            out.append("\n".join(lines))
+        self.send("\n\n".join(out), reply_to=reply_to)
+
     # ---------------- «че съесть» ----------------
     def usual_text(self, days=30):
         """Что он ест чаще всего (для вкуса рекомендаций) + привычные места."""
         since = (d_(self.today()) - timedelta(days=days)).isoformat()
         cnt = {}
         for e in self.s.entries:
-            if e["status"] in FOOD_DONE and e["day"] >= since and e.get("item"):
+            if e["status"] in FOOD_DONE and e["day"] >= since and e.get("item") and e.get("kind") != "бад":
                 key = e["item"] + (f" ({e['place']})" if e.get("place") and e["place"].lower() != "дом" else "")
                 cnt[key] = cnt.get(key, 0) + 1
         top = sorted(cnt.items(), key=lambda x: -x[1])[:30]
@@ -468,8 +546,8 @@ class FoodBot:
 
     def history_text(self, days=4):
         since = (d_(self.today()) - timedelta(days=days)).isoformat()
-        rows = [e for e in self.s.entries
-                if e["status"] in FOOD_DONE + (NEED_ASK, WAITING) and e["day"] >= since]
+        rows = [e for e in self.s.entries if e.get("kind") != "бад"
+                and e["status"] in FOOD_DONE + (NEED_ASK, WAITING) and e["day"] >= since]
         return "\n".join(f"{e['id']} | {e['time']} | {e['item']} | {e['place']} | {e['variant']} | "
                           f"{e['amount']} | {fmt_num(e['kcal'], 'ккал')}"
                           + (" | ждёт уточнения" if e["status"] in (NEED_ASK, WAITING) else "")
