@@ -162,8 +162,12 @@ function dispatch_() {
 }
 
 function tg_(method, params) {
+  // Все значения — строками: числа в payload UrlFetchApp может не передать,
+  // и тогда Telegram не получает offset и присылает одни и те же сообщения снова.
+  const payload = {};
+  Object.keys(params || {}).forEach(k => { payload[k] = String(params[k]); });
   const r = UrlFetchApp.fetch('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/' + method, {
-    method: 'post', payload: params, muteHttpExceptions: true
+    method: 'post', payload: payload, muteHttpExceptions: true
   });
   return JSON.parse(r.getContentText());
 }
