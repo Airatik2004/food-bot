@@ -80,6 +80,8 @@ class FakeAI:
         if "ответ на сообщение бота" in text:
             assert "без тоста" in text and "Яичница с тостом" in text
             return {"transcript": text, "items": [item("Яичница (без тоста, с сыром)", 300, place="дом")]}
+        if "че по белку подскажешь" in text:
+            return {"transcript": text, "items": [], "request": {"mode": "eat", "wish": "добрать белок"}}
         if "Съел вариант из совета бота" in text:
             assert "Яичница" in text and "Омлет" not in text, text
             return {"transcript": text, "items": [item("Яичница с тостом", 250, place="дом")]}
@@ -382,6 +384,22 @@ def test_reply_to_recipe_with_changes():
     run(bot, clock, T(9, 9, 31), m)
     assert s.entries[-1]["item"].startswith("Яичница (без тоста")
     assert tg.sent[-1]["text"].startswith("🍽")
+
+
+def test_plan_shop_and_free_request():
+    s, tg, ai, bot, clock = make()
+    run(bot, clock, T(9, 21, 1), msg(1, T(9, 21), "составь меню на завтра"))
+    assert ai.last_suggest["mode"] == "plan" and ai.last_suggest["wish"] == "на завтра"
+    r = tg.sent[-1]
+    assert r["text"].startswith("📋 Меню — на завтра") and "Итого по меню: ≈ 510 ккал" in r["text"], r["text"]
+    assert len(r["buttons"]) == 2 and r["buttons"][0][0][0].startswith("✅ ")
+    run(bot, clock, T(9, 21, 5), msg(2, T(9, 21, 4), "че купить в ВкусВилл"))
+    assert ai.last_suggest["mode"] == "shop" and ai.last_suggest["wish"] == "в ВкусВилл"
+    assert tg.sent[-1]["text"].startswith("🛒 Что купить")
+    n = len(s.entries)
+    run(bot, clock, T(9, 21, 9), msg(3, T(9, 21, 8), "че по белку подскажешь"))
+    assert ai.last_suggest["mode"] == "eat" and ai.last_suggest["wish"] == "добрать белок"
+    assert tg.sent[-1]["text"].startswith("🍴") and s.entries[-1]["status"] == "не еда"
 
 
 def test_store_helpers():
