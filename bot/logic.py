@@ -29,7 +29,7 @@ HELP = """Привет! Я записываю, что ты ешь, и счита
 
 Команды:
 /day — отчёт за сегодня на текущий момент: все показатели против нормы и что съедено
-/supps — отметить бады (утро / день / вечер). Можно текстом: «выпил утренние бады», «бады все»
+/supps — отметить бады (утро / день / вечер / перед тренировкой). Можно текстом: «выпил утренние бады», «бады все», «креатин перед тренировкой»
 /eat — что съесть сейчас (с учётом остатка КБЖУ и времени). Можно и текстом: «че съесть», «что бы съесть сладкое»
 /recipe — рецепты под желание и твои вкусы. Можно текстом: «хочу что-то с яйцами», «рецепт сырников», «что приготовить из курицы»
 /plan — меню на день: «составь меню на завтра», «рацион на сегодня»
@@ -44,7 +44,8 @@ PLAN_RE = re.compile(r"^\s*(?:/plan\b|(?:составь|сделай|дай|пр
                      r"(?:меню|рацион|диет\w*|план\s+питания)(?=\s*(?:на\b|$|[?!.,])))[\s?!.,:]*(.*)$", re.I | re.S)
 SHOP_RE = re.compile(r"^\s*(?:/shop\b|(?:ч[её]|что|чо|шо)\s+(?:бы\s+)?(?:мне\s+)?купить)\b[\s?!.,:]*(.*)$",
                      re.I | re.S)
-SUPP_SLOTS = ("утро", "день", "вечер")
+SUPP_SLOTS = ("утро", "день", "вечер")  # «все за день»
+SUPP_EXTRA = ("тренировка",)  # отдельно: не каждый день
 
 
 def supp_slots(text: str):
@@ -53,6 +54,8 @@ def supp_slots(text: str):
     if re.search(r"\bвс[её]\b|\bвсе\b", t):
         return list(SUPP_SLOTS)
     out = []
+    if re.search(r"трен|\bзал", t):
+        out.append("тренировка")
     if re.search(r"утр", t):
         out.append("утро")
     if re.search(r"дн[её]м|\bдень|дневн|обед", t):
@@ -179,7 +182,7 @@ class FoodBot:
     def handle_message(self, m: dict):
         text = (m.get("text") or m.get("caption") or "").strip()
         if not m.get("reply_to_message") and (text.lower().startswith("/supp")
-                                              or (re.search(r"\bбад", text, re.I) and len(text) < 60)):
+                                              or (re.search(r"\bбад|креатин", text, re.I) and len(text) < 60)):
             return self.supps(supp_slots(text), reply_to=m["message_id"])
         if not m.get("reply_to_message"):
             eat, rec = EAT_RE.match(text), RECIPE_RE.match(text)
@@ -341,6 +344,7 @@ class FoodBot:
         if not slots:
             self.send("💊 Какие бады отметить?", reply_to=reply_to, buttons=[
                 [("✅ Утро", "supp:утро"), ("✅ День", "supp:день"), ("✅ Вечер", "supp:вечер")],
+                [("🏋️ Перед тренировкой", "supp:тренировка")],
                 [("✅ Все за день", "supp:все")]])
             return
         now = self.now()

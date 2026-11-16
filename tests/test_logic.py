@@ -463,3 +463,11 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("OK", name)
+
+
+def test_supp_training_slot():
+    from bot.logic import supp_slots
+    assert supp_slots("креатин перед тренировкой") == ["тренировка"]
+    assert supp_slots("бады утро") == ["утро"]
+    assert supp_slots("бады все") == ["утро", "день", "вечер"]
+    assert supp_slots("креатин") == []
