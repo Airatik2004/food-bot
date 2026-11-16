@@ -471,3 +471,15 @@ def test_supp_training_slot():
     assert supp_slots("бады утро") == ["утро"]
     assert supp_slots("бады все") == ["утро", "день", "вечер"]
     assert supp_slots("креатин") == []
+
+
+def test_late_caffeine_and_supp_omega():
+    s, tg, ai, bot, clock = make()
+    s.norms += [{"key": "omega3", "value": 250, "type": "не меньше", "unit": "мг"}]
+    s.supps = [{"slot": "утро", "name": "Омега-3", "count": 1, "omega3": 350, "creatine": 0}]
+    run(bot, clock, T(9, 8, 1), msg(1, T(9, 8), "бады утро"))
+    assert "Омега-3 (ЭПК+ДГК): 350 / ≥250" in tg.sent[-1]["text"], tg.sent[-1]["text"]
+    late = [{"item": "Кола", "caffeine": 48, "time": "2026-11-09 19:00"},
+            {"item": "Американо", "caffeine": 160, "time": "2026-11-09 10:00"}]
+    w = bot.limit_warnings(late, "2026-11-09")
+    assert len(w) == 1 and w[0].startswith("☕ Кола — ≈48 мг кофеина после 17:00"), w

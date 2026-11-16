@@ -4,7 +4,7 @@
 # чтобы не сдвигать старые колонки
 BASE_NUTRIENTS = ["kcal", "protein", "fat", "carbs", "sugar", "fiber",
                   "na", "k", "ca", "mg", "fe", "zn", "p"]
-EXTRA_NUTRIENTS = ["creatine"]
+EXTRA_NUTRIENTS = ["creatine", "caffeine", "satfat", "omega3"]
 NUTRIENTS = BASE_NUTRIENTS + EXTRA_NUTRIENTS
 
 NUTRIENT_NAMES = {
@@ -13,6 +13,7 @@ NUTRIENT_NAMES = {
     "na": ("Натрий", "мг"), "k": ("Калий", "мг"), "ca": ("Кальций", "мг"),
     "mg": ("Магний", "мг"), "fe": ("Железо", "мг"), "zn": ("Цинк", "мг"),
     "p": ("Фосфор", "мг"), "creatine": ("Креатин", "г"),
+    "caffeine": ("Кофеин", "мг"), "satfat": ("Насыщенные жиры", "г"), "omega3": ("Омега-3 (ЭПК+ДГК)", "мг"),
 }
 
 SHEET_ENTRIES = "Записи"
@@ -25,25 +26,25 @@ SHEET_PURCHASES = "Покупки"
 SHEET_INBOX = "Входящие"
 SHEET_SUPPS = "Бады"
 
-# Порядок колонок листа «Записи» (A..AH)
+# Порядок колонок листа «Записи» (A..AK)
 ENTRY_COLS = ["id", "day", "time", "kind", "text", "item", "place", "variant",
               "amount", "grams", *BASE_NUTRIENTS, "status", "question", "answers",
               "source", "msg_id", "question_msg_id", "file_id", "media_group", "options",
               "reply_msg_id", *EXTRA_NUTRIENTS]
 
-# Порядок колонок листа «Итоги» (A..T). Нутриенты и approx заполняются формулами.
+# Порядок колонок листа «Итоги» (A..W). Нутриенты и approx заполняются формулами.
 DAY_COLS = ["day", "phase", *BASE_NUTRIENTS, "approx", "report_at", "last_reminder",
             "correction_at", *EXTRA_NUTRIENTS]
 
-# Порядок колонок листа «Справочник» (A..U)
+# Порядок колонок листа «Справочник» (A..X)
 DICT_COLS = ["place", "item", "variant", "portion", "grams", *BASE_NUTRIENTS,
              "source", "added", *EXTRA_NUTRIENTS]
 
 # Лист «Покупки» (A..E) — товары из чеков, подсказка для будущих записей
 PURCHASE_COLS = ["date", "name", "brand", "amount", "grams"]
 
-# Лист «Бады» (A..H): какие бады в какой приём и что из них идёт в нормы
-SUPP_COLS = ["slot", "name", "count", "kcal", "fat", "mg", "zn", "note", "creatine"]
+# Лист «Бады» (A..L): какие бады в какой приём и что из них идёт в нормы
+SUPP_COLS = ["slot", "name", "count", "kcal", "fat", "mg", "zn", "note", *EXTRA_NUTRIENTS]
 
 STATE_KEYS = ["last_update_id", "current_day", "awaiting"]
 

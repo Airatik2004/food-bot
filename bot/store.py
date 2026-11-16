@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from .schema import (COLLECT, DAY_COLS, DICT_COLS, ENTRY_COLS, NUTRIENTS, PURCHASE_COLS,
+from .schema import (EXTRA_NUTRIENTS, NUTRIENT_NAMES, COLLECT, DAY_COLS, DICT_COLS, ENTRY_COLS, NUTRIENTS, PURCHASE_COLS,
                      SHEET_DAYS, SHEET_DICT, SHEET_ENTRIES, SHEET_INBOX, SHEET_NORMS,
                      SHEET_PURCHASES, SHEET_SETTINGS, SHEET_STATE, SHEET_SUPPS, STATE_KEYS,
                      SUPP_COLS, col_letter)
@@ -45,7 +45,7 @@ def to_cell(v):
 
 
 DEFAULT_SETTINGS = {
-    "tolerance": 10, "day_start": "05:00", "ask_time": "21:00",
+    "tolerance": 10, "day_start": "05:00", "caffeine_cutoff": "17:00", "ask_time": "21:00",
     "report_time": "21:30", "deadline": "01:00", "reminder_every": 30,
     "live_window": 15, "model": "gemini-3.6-flash", "web_search": "да",
 }
@@ -221,8 +221,10 @@ class SheetStore(Store):
         self.supps = _rows_to_dicts(vr[8], SUPP_COLS) if len(vr) > 8 else []
         if entries and len(entries[0]) < len(ENTRY_COLS):  # заголовки новых колонок
             self.sh.values_batch_update(body={"valueInputOption": "RAW", "data": [
-                {"range": f"'{SHEET_ENTRIES}'!AE1:AH1",
-                 "values": [["Группа фото", "Варианты", "Ответ бота (id)", "Креатин, г"]]}]})
+                {"range": f"'{SHEET_ENTRIES}'!AE1:{col_letter(len(ENTRY_COLS) - 1)}1",
+                 "values": [["Группа фото", "Варианты", "Ответ бота (id)",
+                             *[f"{NUTRIENT_NAMES[k][0]}, {NUTRIENT_NAMES[k][1]}"
+                               for k in EXTRA_NUTRIENTS]]]}]})
         self.entries = _rows_to_dicts(entries, ENTRY_COLS)
         for e in self.entries:
             for k in ("day", "time", "question_msg_id", "file_id", "text", "media_group",
