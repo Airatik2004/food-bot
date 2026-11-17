@@ -177,6 +177,13 @@ REFINE_TASK = """Ранее ты разобрал запись пользова�
 }}"""
 
 
+class _Fail:
+    """Подмена ответа, когда запрос не дошёл (таймаут, обрыв соединения)."""
+
+    def __init__(self, text):
+        self.status_code, self.text = 504, text
+
+
 class Gemini:
     def __init__(self, api_key: str, model: str, web_search: bool = True):
         self.key = api_key
@@ -206,7 +213,10 @@ class Gemini:
             waits = [3, 8, 15, 25]
             for retry in range(len(waits) + 1):
                 model = self.model if retry < 3 or not self.fallback else self.fallback
-                r = self._post(parts, search, json_mode, system, model=model)
+                try:
+                    r = self._post(parts, search, json_mode, system, model=model)
+                except requests.RequestException as ex:   # таймаут/обрыв — как перегрузка
+                    r = _Fail(str(ex)[:200])
                 if r.status_code in (429, 500, 502, 503, 504) and retry < len(waits):
                     log.warning("Gemini %s → %s, жду %s с", model, r.status_code, waits[retry])
                     time.sleep(waits[retry])
