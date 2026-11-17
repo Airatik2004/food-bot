@@ -535,3 +535,29 @@ def test_choose_fallback():
     assert choose_fallback(names, "gemini-3.6-flash") == "gemini-3.6-flash-lite"
     assert choose_fallback(["gemini-3.6-flash", "gemini-3.5-flash"], "gemini-3.6-flash") == "gemini-3.5-flash"
     assert choose_fallback(["gemini-3.6-flash"], "gemini-3.6-flash") == ""
+
+
+def test_gemini_search_quota_falls_back_to_no_search():
+    from bot.gemini import Gemini
+
+    class R:
+        def __init__(self, code, text="", body=None):
+            self.status_code, self.text, self._b = code, text, body
+
+        def json(self):
+            return self._b
+
+    g = Gemini("k", "main-model")
+    g._auto_fallback = "lite-model"
+    calls = []
+
+    def post(parts, search, json_mode, system=None, model=None):
+        calls.append((model, search))
+        if search:
+            return R(429, '{"error": "You exceeded your current quota"}')
+        return R(200, body={"candidates": [{"content": {"parts": [{"text": '{"ok": 1}'}]}}]})
+
+    g._post = post
+    assert g._call([{"text": "x"}], use_search=True) == {"ok": 1}
+    assert calls == [("main-model", True), ("lite-model", True), ("main-model", False)]
+    assert g.no_search

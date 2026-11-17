@@ -501,7 +501,9 @@ class FoodBot:
                 usual=self.usual_text() or "(пока мало данных)", wish=wish or "нет")
         except Exception as ex:
             log.exception("suggest: %s", ex)
-            self.send("Не получилось придумать, попробуй ещё раз через минуту.", reply_to=reply_to)
+            why = ("у Gemini закончился бесплатный лимит запросов — обычно он обновляется к утру"
+                   if "quota" in str(ex).lower() else "Gemini сейчас перегружен")
+            self.send(f"Не получилось придумать: {why}. Попробуй чуть позже.", reply_to=reply_to)
             return
         opts = res.get("options") or []
         if not opts:

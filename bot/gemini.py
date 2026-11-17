@@ -213,6 +213,7 @@ class Gemini:
         self.model = model
         self.web_search = web_search
         self._auto_fallback = None
+        self.no_search = False
         self.fallback = ""  # запасная модель, если основная перегружена (лист «Настройки», fallback_model)
 
     def _post(self, parts, use_search, json_mode, system=None, model=None):
@@ -247,22 +248,37 @@ class Gemini:
         return self._auto_fallback
 
     def _call(self, parts, use_search, system=None):
-        """Один запрос; при ошибке режима JSON вместе с поиском — повтор без JSON-режима."""
-        modes = [(use_search, True)] + ([(True, False)] if use_search else [])
+        """Запрос с повторами. Перегрузка (503/таймаут) — ждём и пробуем запасную модель.
+        Кончилась квота (429) — сразу запасная модель; если упёрлись в квоту поиска — отвечаем без поиска."""
+        modes = [(True, True), (True, False), (False, True)] if use_search else [(False, True)]
         last_err = None
         for search, json_mode in modes:
+            if search and self.no_search:
+                continue
             waits = [3, 8, 15, 25]
-            for retry in range(len(waits) + 1):
-                model = self.model if retry < 2 else (self.pick_fallback() or self.model)
+            quota_models = set()
+            retry = 0
+            while True:
+                model = self.model if retry < 2 and self.model not in quota_models \
+                    else (self.pick_fallback() or self.model)
+                if model in quota_models:
+                    break
                 try:
                     r = self._post(parts, search, json_mode, system, model=model)
                 except requests.RequestException as ex:   # таймаут/обрыв — как перегрузка
                     r = _Fail(str(ex)[:200])
+                if r.status_code == 429 and "quota" in r.text.lower():
+                    log.warning("Gemini %s (search=%s): кончилась квота", model, search)
+                    quota_models.add(model)
+                    continue
                 if r.status_code in (429, 500, 502, 503, 504) and retry < len(waits):
                     log.warning("Gemini %s → %s, жду %s с", model, r.status_code, waits[retry])
                     time.sleep(waits[retry])
+                    retry += 1
                     continue
                 break
+            if quota_models and search:
+                self.no_search = True   # квота поиска на сегодня, видимо, всё — дальше без него
             if r.status_code != 200:
                 last_err = f"{r.status_code}: {r.text[:300]}"
                 log.warning("Gemini (search=%s json=%s) → %s", search, json_mode, last_err)
