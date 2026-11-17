@@ -28,7 +28,7 @@ HELP = """Привет! Я записываю, что ты ешь, и счита
 • Новый день начинается в {start}: всё, что съел ночью, идёт во вчера. В {start} пришлю итог за прошедший день; неотвеченное посчитаю «примерно» (ответить можно и потом).
 
 Команды:
-/day — отчёт за сегодня на текущий момент: все показатели против нормы и что съедено
+/day — отчёт за сегодня на текущий момент. За другой день: «/day вчера», «/day 15.11», «статистика за понедельник»
 /supps — отметить бады (утро / день / вечер / перед тренировкой). Можно текстом: «выпил утренние бады», «бады все», «креатин перед тренировкой»
 /eat — что съесть сейчас (с учётом остатка КБЖУ и времени). Можно и текстом: «че съесть», «что бы съесть сладкое»
 /recipe — рецепты под желание и твои вкусы. Можно текстом: «хочу что-то с яйцами», «рецепт сырников», «что приготовить из курицы»
@@ -45,6 +45,9 @@ PLAN_RE = re.compile(r"^\s*(?:/plan\b|(?:составь|сделай|дай|пр
 SHOP_RE = re.compile(r"^\s*(?:/shop\b|(?:ч[её]|что|чо|шо)\s+(?:бы\s+)?(?:мне\s+)?купить)\b[\s?!.,:]*(.*)$",
                      re.I | re.S)
 BUSY_SRC = "ИИ занят"
+DAY_ASK_RE = re.compile(r"^\s*(?:/day\b|/report\b|(?:покажи\s+|дай\s+)?(?:статистик\w*|стат[аы]?|отч[её]т\w*|"
+                        r"итог\w*|сводк\w*)\b)\s*(?:за\s+|на\s+)?(.*?)[\s?!.]*$", re.I | re.S)
+WEEKDAY_FULL = ["понедельник", "вторник", "сред", "четверг", "пятниц", "суббот", "воскресень"]
 SUPP_SLOTS = ("утро", "день", "вечер")  # «все за день»
 SUPP_EXTRA = ("тренировка",)  # отдельно: не каждый день
 
@@ -94,6 +97,50 @@ def at(day: str, t: time) -> datetime:
 def fmt_day(day: str) -> str:
     d = d_(day)
     return f"{WEEKDAYS[d.weekday()]}, {d.day} {MONTHS[d.month - 1]}"
+
+
+def parse_day_arg(arg: str, today: str):
+    """«вчера», «позавчера», «15.11», «15 ноября», «понедельник», «2026-11-15» → ISO-день; '' → today;
+    непонятно → None."""
+    t = arg.strip().lower()
+    td = d_(today)
+    if not t or t in ("сегодня", "сейчас", "today"):
+        return today
+    if t.startswith("позавчера"):
+        return (td - timedelta(days=2)).isoformat()
+    if t.startswith("вчера"):
+        return (td - timedelta(days=1)).isoformat()
+    m = re.search(r"(\d+)\s+дн\w*\s+назад", t)
+    if m:
+        return (td - timedelta(days=int(m.group(1)))).isoformat()
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", t)
+    if m:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat()
+    m = re.match(r"(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?", t)
+    mon = None
+    if m:
+        day_n, mon = int(m.group(1)), int(m.group(2))
+        year = int(m.group(3)) if m.group(3) else td.year
+        year += 2000 if year < 100 else 0
+    else:
+        m = re.match(r"(\d{1,2})\s+([а-я]+)", t)
+        if m:
+            day_n = int(m.group(1))
+            mon = next((i + 1 for i, name in enumerate(MONTHS) if m.group(2)[:3] == name[:3]), None)
+            year = td.year
+    if mon:
+        try:
+            d = date(year, mon, day_n)
+        except ValueError:
+            return None
+        if d > td and not (m and m.lastindex and m.lastindex >= 3 and m.group(3)):
+            d = date(year - 1, mon, day_n)
+        return d.isoformat()
+    for i, name in enumerate(WEEKDAY_FULL):
+        if t.startswith(name) or t == WEEKDAYS[i]:
+            back = (td.weekday() - i) % 7
+            return (td - timedelta(days=back)).isoformat()
+    return None
 
 
 def assign_day(ts: datetime, day_start: time) -> str:
@@ -186,6 +233,15 @@ class FoodBot:
                                               or (re.search(r"\bбад|креатин", text, re.I) and len(text) < 60)):
             return self.supps(supp_slots(text), reply_to=m["message_id"])
         if not m.get("reply_to_message"):
+            ask = DAY_ASK_RE.match(text)
+            if ask and (text.startswith("/") or len(text) < 50):
+                day = parse_day_arg(ask.group(1), self.today())
+                if day:
+                    self.process_new()
+                    return self.send(self.day_report(day), reply_to=m["message_id"])
+                if text.startswith("/"):
+                    return self.send("Не понял, за какой день. Например: /day вчера, /day 15.11, "
+                                     "/day понедельник", reply_to=m["message_id"])
             eat, rec = EAT_RE.match(text), RECIPE_RE.match(text)
             plan, shop = PLAN_RE.match(text), SHOP_RE.match(text)
             if plan:
@@ -942,9 +998,14 @@ class FoodBot:
         food = sorted([e for e in self.s.entries_of(day) if e["status"] in COUNTED],
                       key=lambda x: x["time"])
         totals = {k: sum(to_num(e.get(k), 0) or 0 for e in food) for k in NUTRIENTS}
-        out = [f"📊 Сегодня, {fmt_day(day)} — на {self.now().strftime('%H:%M')}"]
-        out += self.norms_block(totals, live=True)
-        out += ["", "🍽 Съедено:" if food else "🍽 Пока ничего не записано."]
+        live = day == self.today()
+        if live:
+            out = [f"📊 Сегодня, {fmt_day(day)} — на {self.now().strftime('%H:%M')}"]
+        else:
+            out = [f"📊 За {fmt_day(day)}"]
+        out += self.norms_block(totals, live=live)
+        out += ["", "🍽 Съедено:" if food else ("🍽 Пока ничего не записано." if live
+                                                else "🍽 За этот день записей нет.")]
         approx = False
         for e in food:
             mark = ""

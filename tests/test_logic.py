@@ -505,3 +505,24 @@ def test_same_as_copies_and_busy_notice():
     n = len(tg.sent)
     bot.process_new()
     assert len(tg.sent) == n   # второй раз не пишем
+
+
+def test_day_arg_and_past_report():
+    from bot.logic import parse_day_arg
+    t = "2026-11-17"  # вторник
+    assert parse_day_arg("", t) == t
+    assert parse_day_arg("вчера", t) == "2026-11-16"
+    assert parse_day_arg("позавчера", t) == "2026-11-15"
+    assert parse_day_arg("15.11", t) == "2026-11-15"
+    assert parse_day_arg("9 ноября", t) == "2026-11-09"
+    assert parse_day_arg("понедельник", t) == "2026-11-16"
+    assert parse_day_arg("вт", t) == t
+    assert parse_day_arg("31.12", t) == "2025-12-31"
+    assert parse_day_arg("ерунда", t) is None
+    s, tg, ai, bot, clock = make()
+    run(bot, clock, T(8, 20), msg(1, T(8, 20), "пельмени 400"))
+    run(bot, clock, T(9, 14), msg(2, T(9, 14), "статистика за вчера"))
+    r = [x["text"] for x in tg.sent if x["text"].startswith("📊 За")][-1]
+    assert r.startswith("📊 За вс, 8 ноября") and "Пельмени" in r, r
+    run(bot, clock, T(9, 14, 1), msg(3, T(9, 14, 1), "/day 1.11"))
+    assert "записей нет" in tg.sent[-1]["text"]

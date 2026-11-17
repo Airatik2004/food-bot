@@ -25,6 +25,10 @@ function setup() {
   }
   ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('poll').timeBased().everyMinutes(1).create();
+  if (typeof daily === 'function') {   // будильник итога дня (файл Daily.gs)
+    ScriptApp.newTrigger('daily').timeBased()
+      .everyDays(1).atHour(5).nearMinute(16).inTimezone('Europe/Moscow').create();
+  }
 
   const gh = dispatch_();
   const ghMsg = gh === 204 ? 'GitHub: ок.' : 'GitHub ответил кодом ' + gh + ' — проверь GITHUB_TOKEN.';
