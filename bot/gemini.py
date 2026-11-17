@@ -44,8 +44,11 @@ ITEM_SCHEMA = """{
   "eaten_at": "ЧЧ:ММ, только если пользователь явно назвал время, иначе null",
   "yesterday": true, если пользователь явно сказал, что это было вчера, иначе false,
   "updates_id": id записи из истории, если сообщение уточняет уже записанную позицию, иначе null,
+  "same_as_id": id записи из истории, если это ПОВТОР того же блюда («как вчера», «то же самое», «опять тот
+    же раф») — тогда КБЖУ возьмут из той записи (с пересчётом на граммы); иначе null,
   "nutrients": {"kcal": 0, "protein": 0, "fat": 0, "carbs": 0, "sugar": 0, "fiber": 0,
-                "na": 0, "k": 0, "ca": 0, "mg": 0, "fe": 0, "zn": 0, "p": 0}
+                "na": 0, "k": 0, "ca": 0, "mg": 0, "fe": 0, "zn": 0, "p": 0,
+                "creatine": 0, "caffeine": 0, "satfat": 0, "omega3": 0}
 }"""
 
 RULES = f"""Ты помощник дневника питания. Пользователь (Айрат) записывает в Telegram, что съел или выпил:
@@ -57,8 +60,15 @@ RULES = f"""Ты помощник дневника питания. Пользо�
 - где куплено или кто производитель (у сетей и брендов разные рецепты);
 - вид/вкус/рецепт: раф классический или с сиропом, молоко обычное/овсяное/безлактозное, жирность творога;
 - способ приготовления и жир: жарил ли, на каком масле, сколько масла;
-- добавки: сахар, сироп, соус, майонез, сыр, хлеб к блюду.
-Не спрашивай о том, что почти не влияет на результат (соль по вкусу, специи, вода, чай без сахара).
+- добавки: сахар, сироп, соус, майонез, сыр, хлеб к блюду;
+- ДОМАШНЯЯ ЕДА (place="дом"): соль и мясо. Пользователь следит за натрием, поэтому соль — не мелочь.
+  Натрий домашнего блюда = природный натрий продуктов (сырое мясо ~60–80 мг/100 г, мука/крупы/овощи ~0–10,
+  яйцо ~70/шт, молоко ~45/100 мл) + добавленная соль (1 г соли = 390 мг натрия). НЕ подставляй «типичную»
+  соль магазинных или ресторанных блюд. Если сколько солил — неизвестно, спроси
+  (варианты: «не солил», «чуть-чуть», «как обычно ~1%», «щепотка в воду»), а в оценку пока возьми ~0.5% соли.
+  Жир и насыщенные жиры — по мясу: если вид/жирность мяса неизвестны и это заметно меняет КБЖУ (фарш, котлеты,
+  пельмени, шашлык), спроси (варианты: «постная говядина», «говядина обычная», «говядина+свинина»).
+Не спрашивай о том, что почти не влияет на результат (специи, вода, чай без сахара).
 
 САХАР (поле sugar) — только добавленный («свободный», по ВОЗ): сахар, сиропы, мёд, варенье, сладкие напитки
 и соки, сладости, сахар в выпечке, соусах, сладких йогуртах и сырках. НЕ считай естественный сахар цельных
@@ -170,8 +180,9 @@ class Gemini:
         self.key = api_key
         self.model = model
         self.web_search = web_search
+        self.fallback = ""  # запасная модель, если основная перегружена (лист «Настройки», fallback_model)
 
-    def _post(self, parts, use_search, json_mode, system=None):
+    def _post(self, parts, use_search, json_mode, system=None, model=None):
         body = {
             "systemInstruction": {"parts": [{"text": system or RULES}]},
             "contents": [{"role": "user", "parts": parts}],
@@ -181,7 +192,7 @@ class Gemini:
             body["generationConfig"]["responseMimeType"] = "application/json"
         if use_search:
             body["tools"] = [{"google_search": {}}]
-        r = requests.post(URL.format(model=self.model), json=body, timeout=120,
+        r = requests.post(URL.format(model=model or self.model), json=body, timeout=120,
                           headers={"x-goog-api-key": self.key})
         return r
 
@@ -190,10 +201,13 @@ class Gemini:
         modes = [(use_search, True)] + ([(True, False)] if use_search else [])
         last_err = None
         for search, json_mode in modes:
-            for retry in range(3):
-                r = self._post(parts, search, json_mode, system)
-                if r.status_code in (429, 500, 503) and retry < 2:
-                    time.sleep(3 * (retry + 1))
+            waits = [3, 8, 15, 25]
+            for retry in range(len(waits) + 1):
+                model = self.model if retry < 3 or not self.fallback else self.fallback
+                r = self._post(parts, search, json_mode, system, model=model)
+                if r.status_code in (429, 500, 502, 503, 504) and retry < len(waits):
+                    log.warning("Gemini %s → %s, жду %s с", model, r.status_code, waits[retry])
+                    time.sleep(waits[retry])
                     continue
                 break
             if r.status_code != 200:
@@ -402,6 +416,7 @@ def normalize_item(i: dict) -> dict:
         "eaten_at": i.get("eaten_at") or None,
         "yesterday": bool(i.get("yesterday")),
         "updates_id": i.get("updates_id") if isinstance(i.get("updates_id"), int) else None,
+        "same_as_id": i.get("same_as_id") if isinstance(i.get("same_as_id"), int) else None,
         "nutrients": {k: _num(n.get(k)) for k in NUTRIENTS},
     }
     if not out["complete"] and not out["question"]:

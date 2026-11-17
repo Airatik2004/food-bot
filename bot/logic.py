@@ -44,6 +44,7 @@ PLAN_RE = re.compile(r"^\s*(?:/plan\b|(?:составь|сделай|дай|пр
                      r"(?:меню|рацион|диет\w*|план\s+питания)(?=\s*(?:на\b|$|[?!.,])))[\s?!.,:]*(.*)$", re.I | re.S)
 SHOP_RE = re.compile(r"^\s*(?:/shop\b|(?:ч[её]|что|чо|шо)\s+(?:бы\s+)?(?:мне\s+)?купить)\b[\s?!.,:]*(.*)$",
                      re.I | re.S)
+BUSY_SRC = "ИИ занят"
 SUPP_SLOTS = ("утро", "день", "вечер")  # «все за день»
 SUPP_EXTRA = ("тренировка",)  # отдельно: не каждый день
 
@@ -575,13 +576,21 @@ class FoodBot:
 
     # ---------------- разбор ----------------
     def process_new(self):
-        """Разобрать все новые записи и сразу ответить на каждую."""
+        """Разобрать все новые записи и сразу ответить на каждую. Возвращает те, что не удалось."""
+        failed = []
         for e in sorted([x for x in self.s.entries if x["status"] == NEW],
                         key=lambda x: to_num(x["id"], 0)):
             try:
                 self.analyze_entry(e)
             except Exception as ex:
                 log.exception("Ошибка разбора записи %s: %s", e["id"], ex)
+                failed.append(e)
+                if e.get("source") != BUSY_SRC and e["status"] == NEW:
+                    e["source"] = BUSY_SRC   # сообщаем один раз
+                    self.s.touch(e)
+                    self.send("⏳ Gemini сейчас перегружен — запишу это, как только он ответит "
+                              "(попробую ещё несколько раз).", reply_to=to_num(e.get("msg_id")) or None)
+        return failed
 
     def analyze_entry(self, e):
         media = self.media(e["kind"], e.get("file_id"))
@@ -711,7 +720,15 @@ class FoodBot:
         nutr = dict(it["nutrients"])
         source = it["source"]
         drow = self.dict_row(it.get("dict_id")) if it["complete"] else None
-        if drow:
+        same = self.s.entry(it.get("same_as_id")) if it.get("same_as_id") and it["complete"] else None
+        if same and same is not e and same["status"] in FOOD_DONE and not drow:
+            ratio = 1.0
+            sg, ig = to_num(same.get("grams"), 0), to_num(it.get("grams"), 0)
+            if sg and ig and abs(ig / sg - 1) > 0.05:
+                ratio = ig / sg
+            nutr = {k: round((to_num(same.get(k), 0) or 0) * ratio, 1) for k in NUTRIENTS}
+            source = "как раньше"
+        elif drow:
             ratio = 1.0
             dg, ig = to_num(drow.get("grams"), 0), to_num(it.get("grams"), 0)
             if dg and ig and abs(ig / dg - 1) > 0.05:

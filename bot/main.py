@@ -93,10 +93,16 @@ def receiver_alive(stamp, minutes=10) -> bool:
     return datetime.now(timezone.utc) - t < timedelta(minutes=minutes)
 
 
-def step(bot: FoodBot, store):
+def step(bot: FoodBot, store, retries=2, pause=45):
     if bot.chat_id:
-        bot.process_new()   # сразу разобрать новые записи и ответить
-        bot.tick()          # вечерние вопросы, отчёты, поправки
+        failed = bot.process_new()   # сразу разобрать новые записи и ответить
+        for _ in range(retries):     # Gemini перегружен — подождать и попробовать ещё
+            if not failed:
+                break
+            store.flush()
+            time.sleep(pause)
+            failed = bot.process_new()
+        bot.tick()          # итоги дня
     store.flush()
 
 
@@ -105,6 +111,7 @@ def main():
     store = SheetStore(service_account(), env("SPREADSHEET_ID")).load()
     ai = Gemini(env("GEMINI_API_KEY"), str(store.setting("model")).strip(),
                 web_search=str(store.setting("web_search")).strip().lower() in ("да", "yes", "1", "true"))
+    ai.fallback = str(store.setting("fallback_model") or "").strip()
     bot = FoodBot(store, tg, ai, env("TELEGRAM_CHAT_ID", required=False))
 
     if receiver_alive(store.state.get("receiver")):

@@ -98,6 +98,15 @@ class FakeAI:
                 return {"transcript": text, "items": [item("Сок", 140, complete=False, place="",
                                                            amount="300 мл")]}
             return {"transcript": text, "items": [item("Сок", 140, place="", amount="300 мл")]}
+        if "пельмени как вчера" in text:
+            ids = {l.split(" | ")[2]: int(l.split(" | ")[0]) for l in history.split("\n") if l}
+            return {"transcript": text, "items": [item("Пельмени", 999, place="дом", amount="400 г",
+                                                       grams=400, same_as_id=ids["Пельмени"])]}
+        if text == "пельмени 400":
+            return {"transcript": text, "items": [item("Пельмени", 800, place="дом", amount="400 г",
+                                                       grams=400)]}
+        if text == "boom":
+            raise RuntimeError("Gemini не ответил: 503")
         if "вчера был он же" in text:
             ids = {l.split(" | ")[2]: int(l.split(" | ")[0]) for l in history.split("\n") if l}
             yid = ids["Гранатовый сок"]
@@ -483,3 +492,16 @@ def test_late_caffeine_and_supp_omega():
             {"item": "Американо", "caffeine": 160, "time": "2026-11-09 10:00"}]
     w = bot.limit_warnings(late, "2026-11-09")
     assert len(w) == 1 and w[0].startswith("☕ Кола — ≈48 мг кофеина после 17:00"), w
+
+
+def test_same_as_copies_and_busy_notice():
+    s, tg, ai, bot, clock = make()
+    run(bot, clock, T(8, 20), msg(1, T(8, 20), "пельмени 400"))
+    run(bot, clock, T(9, 14), msg(2, T(9, 14), "пельмени как вчера"))
+    pel = [e for e in s.entries if e["item"] == "Пельмени"]
+    assert [e["kcal"] for e in pel] == [800, 800] and pel[1]["source"] == "как раньше"
+    run(bot, clock, T(9, 15), msg(3, T(9, 15), "boom"))
+    assert "перегружен" in tg.sent[-1]["text"]
+    n = len(tg.sent)
+    bot.process_new()
+    assert len(tg.sent) == n   # второй раз не пишем
