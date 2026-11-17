@@ -184,11 +184,27 @@ class _Fail:
         self.status_code, self.text = 504, text
 
 
+def choose_fallback(names, main):
+    """Из списка моделей ключа выбрать запасную: сначала flash-lite, потом другая flash (поновее)."""
+    def ver(n):
+        m = re.search(r"gemini-(\d+(?:\.\d+)?)", n)
+        return float(m.group(1)) if m else 0.0
+    bad = ("image", "tts", "audio", "live", "embed", "thinking", "exp", "native", "computer", "robotics")
+    ok = [n for n in names if n != main and n.startswith("gemini-") and not any(b in n for b in bad)]
+    for pat in (r"^gemini-[\d.]+-flash-lite$", r"^gemini-[\d.]+-flash$", r"^gemini-flash(-lite)?-latest$",
+                r"^gemini-[\d.]+-flash-lite-preview", r"^gemini-[\d.]+-flash-preview"):
+        cands = sorted([n for n in ok if re.search(pat, n)], key=ver, reverse=True)
+        if cands:
+            return cands[0]
+    return ""
+
+
 class Gemini:
     def __init__(self, api_key: str, model: str, web_search: bool = True):
         self.key = api_key
         self.model = model
         self.web_search = web_search
+        self._auto_fallback = None
         self.fallback = ""  # запасная модель, если основная перегружена (лист «Настройки», fallback_model)
 
     def _post(self, parts, use_search, json_mode, system=None, model=None):
@@ -205,6 +221,23 @@ class Gemini:
                           headers={"x-goog-api-key": self.key})
         return r
 
+    def pick_fallback(self) -> str:
+        """Запасная модель: из настроек, иначе — сама выбирается из моделей, доступных ключу."""
+        if self.fallback:
+            return self.fallback
+        if self._auto_fallback is None:
+            self._auto_fallback = ""
+            try:
+                r = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
+                                 params={"pageSize": 200}, headers={"x-goog-api-key": self.key}, timeout=20)
+                names = [m["name"].split("/", 1)[-1] for m in r.json().get("models", [])
+                         if "generateContent" in m.get("supportedGenerationMethods", [])]
+                self._auto_fallback = choose_fallback(names, self.model)
+                log.info("Запасная модель: %s", self._auto_fallback or "нет")
+            except Exception as ex:
+                log.warning("Не получил список моделей: %s", ex)
+        return self._auto_fallback
+
     def _call(self, parts, use_search, system=None):
         """Один запрос; при ошибке режима JSON вместе с поиском — повтор без JSON-режима."""
         modes = [(use_search, True)] + ([(True, False)] if use_search else [])
@@ -212,7 +245,7 @@ class Gemini:
         for search, json_mode in modes:
             waits = [3, 8, 15, 25]
             for retry in range(len(waits) + 1):
-                model = self.model if retry < 3 or not self.fallback else self.fallback
+                model = self.model if retry < 2 else (self.pick_fallback() or self.model)
                 try:
                     r = self._post(parts, search, json_mode, system, model=model)
                 except requests.RequestException as ex:   # таймаут/обрыв — как перегрузка

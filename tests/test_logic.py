@@ -526,3 +526,12 @@ def test_day_arg_and_past_report():
     assert r.startswith("📊 За вс, 8 ноября") and "Пельмени" in r, r
     run(bot, clock, T(9, 14, 1), msg(3, T(9, 14, 1), "/day 1.11"))
     assert "записей нет" in tg.sent[-1]["text"]
+
+
+def test_choose_fallback():
+    from bot.gemini import choose_fallback
+    names = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash-lite", "gemini-3.6-flash-image",
+             "gemini-3.6-pro", "gemini-embedding-001", "gemini-3.6-flash-tts"]
+    assert choose_fallback(names, "gemini-3.6-flash") == "gemini-3.6-flash-lite"
+    assert choose_fallback(["gemini-3.6-flash", "gemini-3.5-flash"], "gemini-3.6-flash") == "gemini-3.5-flash"
+    assert choose_fallback(["gemini-3.6-flash"], "gemini-3.6-flash") == ""
