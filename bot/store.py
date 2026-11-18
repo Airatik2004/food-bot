@@ -334,16 +334,15 @@ class SheetStore(Store):
         """Удалить из «Входящих» обработанные строки в начале листа.
         Новые строки приёмщик дописывает в конец, поэтому удалять начало безопасно."""
         last = int(to_num(self.state.get("last_update_id"), 0))
-        n = 0
-        for i, (row, uid) in enumerate(getattr(self, "_inbox_rows", [])):
-            if row != i + 2 or uid > last:
-                break
-            n += 1
-        if n:
+        rows = getattr(self, "_inbox_rows", [])
+        pending = [r for r, uid in rows if uid > last]
+        cut = min(pending) if pending else (max((r for r, _ in rows), default=1) + 1)
+        n = cut - 2   # строки 2..cut-1: обработанные или пустые
+        if n > 0:
             self.sh.batch_update({"requests": [{"deleteDimension": {"range": {
                 "sheetId": self.sheet_ids[SHEET_INBOX], "dimension": "ROWS",
                 "startIndex": 1, "endIndex": 1 + n}}}]})
-            self._inbox_rows = [(r - n, u) for r, u in self._inbox_rows[n:]]
+            self._inbox_rows = [(r - n, u) for r, u in rows if r >= cut]
 
 
 def load_service_account(raw: str) -> dict:
