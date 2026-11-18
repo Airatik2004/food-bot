@@ -338,11 +338,22 @@ class SheetStore(Store):
         pending = [r for r, uid in rows if uid > last]
         cut = min(pending) if pending else (max((r for r, _ in rows), default=1) + 1)
         n = cut - 2   # строки 2..cut-1: обработанные или пустые
-        if n > 0:
+        if n <= 0:
+            return
+        try:
             self.sh.batch_update({"requests": [{"deleteDimension": {"range": {
                 "sheetId": self.sheet_ids[SHEET_INBOX], "dimension": "ROWS",
                 "startIndex": 1, "endIndex": 1 + n}}}]})
-            self._inbox_rows = [(r - n, u) for r, u in rows if r >= cut]
+        except Exception as ex:
+            # Google не даёт удалить все строки под шапкой — тогда просто очищаем их
+            log.info("Входящие: удалить строки не вышло (%s), очищаю", str(ex)[:120])
+            try:
+                self.sh.values_clear(f"'{SHEET_INBOX}'!A2:C{cut - 1}")
+            except Exception as ex2:
+                log.warning("Входящие: не очистил: %s", ex2)
+            self._inbox_rows = [(r, u) for r, u in rows if r >= cut]
+            return
+        self._inbox_rows = [(r - n, u) for r, u in rows if r >= cut]
 
 
 def load_service_account(raw: str) -> dict:
