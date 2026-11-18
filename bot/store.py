@@ -6,12 +6,15 @@ SheetStore — то же самое, но загружает и сохраняе
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 
 from .schema import (EXTRA_NUTRIENTS, NUTRIENT_NAMES, COLLECT, DAY_COLS, DICT_COLS, ENTRY_COLS, NUTRIENTS, PURCHASE_COLS,
                      SHEET_DAYS, SHEET_DICT, SHEET_ENTRIES, SHEET_INBOX, SHEET_NORMS,
                      SHEET_PURCHASES, SHEET_SETTINGS, SHEET_STATE, SHEET_SUPPS, STATE_KEYS,
                      SUPP_COLS, col_letter)
+
+log = logging.getLogger("store")
 
 
 class Formula(str):
