@@ -105,6 +105,9 @@ class FakeAI:
         if text == "пельмени 400":
             return {"transcript": text, "items": [item("Пельмени", 800, place="дом", amount="400 г",
                                                        grams=400)]}
+        if text.startswith("альбом"):
+            n = len(media)
+            return {"transcript": f"{n} фото", "items": [item(f"Позиция {i + 1}", 100) for i in range(n)]}
         if text == "boom":
             raise RuntimeError("Gemini не ответил: 503")
         if "вчера был он же" in text:
@@ -561,3 +564,19 @@ def test_gemini_search_quota_falls_back_to_no_search():
     assert g._call([{"text": "x"}], use_search=True) == {"ok": 1}
     assert calls == [("main-model", True), ("lite-model", True), ("main-model", False)]
     assert g.no_search
+
+
+def test_late_album_photo_redoes_analysis():
+    s, tg, ai, bot, clock = make()
+    m1 = msg(1, T(9, 10), "альбом", photo=True)
+    m1["message"]["media_group_id"] = "g1"
+    run(bot, clock, T(9, 10, 1), m1)
+    assert [e["item"] for e in s.entries if e["status"] == "ок"] == ["Позиция 1"]
+    reply = str(tg.sent[-1]["id"])
+    m2 = msg(2, T(9, 10), "", photo=True)
+    m2["message"]["media_group_id"] = "g1"
+    run(bot, clock, T(9, 11, 1), m2)
+    ok = [e for e in s.entries if e["status"] == "ок"]
+    assert [e["item"] for e in ok] == ["Позиция 1", "Позиция 2"], [(e["item"], e["status"]) for e in s.entries]
+    assert ok[0]["file_id"] == "f1,f2"
+    assert any(mid == reply and "Позиция 2" in t for mid, t in getattr(tg, "edits", [])), "ответ обновился"

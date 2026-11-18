@@ -287,6 +287,11 @@ class FoodBot:
                         e["text"] = (e["text"] + " " + text).strip()
                     self.s.touch(e)
                     return
+            # фото из альбома пришло позже, когда первые уже разобраны, — разбираем альбом заново целиком
+            done = [e for e in self.s.entries if e.get("media_group") == group
+                    and e["status"] not in (NEW, CHANGED, ANSWER)]
+            if done:
+                return self.redo_album(done, file_id, text)
 
         # Реплай на совет или рецепт бота («сделал второй, но без тоста») — передаём ИИ и сам совет
         rt_text = str((rt or {}).get("text") or "")
@@ -300,6 +305,23 @@ class FoodBot:
             self.s.set_state("current_day", day)
         self.s.add_entry(day=day, time=self.stamp(ts), kind=kind, text=text, status=NEW,
                          msg_id=m["message_id"], file_id=file_id, media_group=group)
+
+    def redo_album(self, rows, file_id, text):
+        first = rows[0]
+        for e in rows:
+            e["status"] = CHANGED
+            for k in NUTRIENTS:
+                e[k] = ""
+            self.s.touch(e)
+            if str(self.s.state.get("awaiting")) == str(e["id"]):
+                self.s.set_state("awaiting", "")
+        files = [x for x in str(first.get("file_id") or "").split(",") if x] + [file_id]
+        new = self.s.add_entry(day=first["day"], time=first["time"], kind=first["kind"],
+                               text=(re.sub(r"\s*\[фото:.*\]\s*$", "", first["text"], flags=re.S)
+                                     + " " + text).strip(),
+                               status=NEW, msg_id=first["msg_id"], file_id=",".join(dict.fromkeys(files)),
+                               media_group=first["media_group"], reply_msg_id=first.get("reply_msg_id", ""))
+        self.edited_ids.add(new["id"])
 
     def handle_edit(self, m: dict):
         """Отредактированное сообщение: старые строки помечаем «изменено», запись разбираем заново."""
